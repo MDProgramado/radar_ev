@@ -1,29 +1,53 @@
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
+# ---- Environments ----
 env/
 venv/
 .venv/
-poetry.lock
 .coverage
-.pytest_cache/
 .coverage.*
 htmlcov/
+
+# ---- Distribution ----
 dist/
 build/
 *.egg-info/
 
-# Environment
+# ---- Poetry ----
+# poetry.lock deve ser versionado em projetos de aplicação
+# poetry.lock
+
+# ---- Environment ----
 .env
 
-# IDEs
+# ---- IDEs ----
 .vscode/
 .idea/
 *.swp
 *.swo
+*.swn
 
-# OS
+# ---- OS ----
 .DS_Store
 Thumbs.db
+
+# ---- Testes ----
+.pytest_cache/
+
+# ---- Docker ----
+*.log
+
+# ---- Modelos salvos ----
+models/*.pkl
+models/*.joblib
+
+# ---- MyPy ----
+.mypy_cache/
+
+# ---- Ruff ----
+.ruff_cache/

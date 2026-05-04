@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  radar_ev:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: radar_ev_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Monta o diretório local ./data para dentro do container
+      # Isso garante que history.db e cache.db não sejam apagados quando o container reiniciar
+      - ./data:/app/data
+    environment:
+      # Força o Python a rodar sem buffer para ver os logs em tempo real
+      - PYTHONUNBUFFERED=1
+      - TZ=America/Sao_Paulo  # Define o fuso horário
+
+  # Serviço opcional de teste (usando o mock)
+  radar_ev_mock:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: radar_ev_bot_mock
+    profiles: ["debug"]
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["python", "-m", "radar_ev.orchestrator", "--mock"]
