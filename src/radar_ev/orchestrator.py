@@ -31,6 +31,7 @@ from radar_ev.ev_calculator import (
     calculate_ev_vig_removed,
     create_opportunity,
 )
+from radar_ev.vig_stats import vig_stats
 from radar_ev.http_client import RateLimitError
 from radar_ev.logger import setup_logging
 from radar_ev.models import Match, Opportunity
@@ -119,6 +120,7 @@ def format_market_name(market: str) -> str:
 # =============================================================================
 RATE_LIMIT_DELAY = 0.6  # Segundos entre cada chamada (≈10 req/min)
 MAX_RATE_LIMIT_RETRIES = 3
+FALLBACK_WARNING_THRESHOLD = 20.0  # % mínimo de fallback para emitir ERROR
 
 
 # =============================================================================
@@ -161,21 +163,58 @@ def _calculate_ev_without_vig(
     offered_odd: float,
     market: str,
     odds_list: list,
-) -> float:
+) -> tuple[float, bool]:
     """Calcula o EV usando a odd justa (sem vig) quando o par Over/Under existe.
 
     Se o mercado complementar não estiver na lista (ex: mock), cai para o EV
-    com a odd bruta e registra em log — sem quebrar o pipeline.
+    com a odd bruta e registra em log WARNING — sem quebrar o pipeline.
+
+    Returns:
+        Tupla ``(ev_percent, vig_removed)``.
     """
     complementary = _complementary_odd(market, odds_list)
-    if complementary is not None:
-        return calculate_ev_vig_removed(prediction, offered_odd, complementary)
+    vig_used = complementary is not None
+    vig_stats.record(vig_used)
+    if vig_used:
+        return calculate_ev_vig_removed(prediction, offered_odd, complementary), True
     logger.warning(
         "complementary_odd_not_found",
+        match_id=getattr(prediction, "match_id", None),
         market=market,
         fallback="raw_odd",
     )
-    return calculate_ev(prediction, offered_odd)
+    return calculate_ev(prediction, offered_odd), False
+
+
+def _report_fallback_alert(stats=None, threshold: float = FALLBACK_WARNING_THRESHOLD) -> Optional[str]:
+    """Avalia a taxa de fallback e loga ERROR se exceder o limiar.
+
+    Mensagem monitorável em produção: quando a coleta de pares Over/Under
+    falha com frequência, o EV volta a usar odd bruta (subestimado).
+
+    Args:
+        stats: Contadores de vig (default: singleton global).
+        threshold: % de fallback que dispara o alerta (default 20%).
+
+    Returns:
+        Mensagem de alerta (exibível no console) ou None se abaixo do limiar.
+    """
+    if stats is None:
+        stats = vig_stats
+    if stats.total == 0 or stats.fallback_percent <= threshold:
+        return None
+    message = (
+        f"ALERTA: {stats.fallback_percent:.1f}% das oportunidades usaram odd bruta "
+        "(sem remoção de vig). Verificar coleta de pares Over/Under."
+    )
+    logger.error(
+        "vig_fallback_alert",
+        message=message,
+        fallback_percent=round(stats.fallback_percent, 1),
+        with_vig=stats.with_vig,
+        fallback=stats.fallback,
+    )
+    return message
 
 
 def _parse_market(market: str) -> Optional[Tuple[str, str, float]]:
@@ -233,7 +272,7 @@ async def _run_mock_pipeline() -> List[Opportunity]:
         odds_list = get_mock_odds(match.id)
         for odds in odds_list:
             pred = get_mock_prediction(match.id, odds.market)
-            ev = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
+            ev, vig_used = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
 
             market_amigavel = format_market_name(odds.market)
             odds.market = market_amigavel
@@ -242,10 +281,11 @@ async def _run_mock_pipeline() -> List[Opportunity]:
             if ev >= settings.min_ev_percent:
                 opp = create_opportunity(
                     match=match,
-                    prediction=pred, 
-                    odds=odds, 
+                    prediction=pred,
+                    odds=odds,
                     ev_percent=ev,
-                    reasoning="Análise Estatística Avançada (Poisson)"
+                    reasoning="Análise Estatística Avançada (Poisson)",
+                    vig_removed=vig_used,
                 )
                 ok, reason = apply_all_rules(
                     opp, settings.derby_teams_list, min_motivation=7.0
@@ -397,7 +437,7 @@ async def _process_match_odds(
             continue
 
         # Calcula EV
-        ev = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
+        ev, vig_used = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
 
         market_amigavel = format_market_name(odds.market)
         odds.market = market_amigavel
@@ -410,6 +450,7 @@ async def _process_match_odds(
                 odds=odds,
                 ev_percent=ev,
                 reasoning="Análise Estatística Avançada (Poisson)",
+                vig_removed=vig_used,
             )
 
             # Aplica regras de negócio (Motivação 0.0 pois não temos o scraper integrado ainda)
@@ -589,6 +630,9 @@ async def run_pipeline(use_mock: bool = False) -> List[Opportunity]:
     # Inicializa logging estruturado
     setup_logging(log_level="INFO", json_output=False)
 
+    # Zera contadores de vig desta execução
+    vig_stats.reset()
+
     print("=" * 60)
     print("🎯 RADAR +EV — Sistema de Recomendação Pré-Jogo")
     print(f"📅 Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -616,6 +660,16 @@ async def run_pipeline(use_mock: bool = False) -> List[Opportunity]:
         print("=" * 60)
         print(f"📋 RESUMO: {len(opportunities)} oportunidade(s) encontrada(s)")
         print("=" * 60)
+
+        # Monitora taxa de fallback de pares Over/Under (vig removido vs. odd bruta)
+        if vig_stats.total:
+            print(
+                f"🔎 Vig: {vig_stats.with_vig} com par ({vig_stats.vig_percent:.1f}%) | "
+                f"{vig_stats.fallback} fallback ({vig_stats.fallback_percent:.1f}%)"
+            )
+        fallback_alert = _report_fallback_alert()
+        if fallback_alert:
+            print(f"🔔 {fallback_alert}")
 
         for opp in opportunities:
             print(f"  🎯 {opp.summary}")
