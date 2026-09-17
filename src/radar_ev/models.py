@@ -112,6 +112,10 @@ class Opportunity(BaseModel):
         0.0,
         description="Porcentagem sugerida da banca (Critério de Kelly Fracionário)",
     )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Data e hora em que a oportunidade foi encontrada",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 

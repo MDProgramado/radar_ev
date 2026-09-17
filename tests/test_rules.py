@@ -23,7 +23,7 @@ def _match(home="Palmeiras", away="Corinthians", motivation=8.0,
 
 def _opp(match, market="corners_over_9.5"):
     return Opportunity(match=match, market=market, fair_odd=2.0,
-                       offered_odd=1.8, ev_percent=11.1, confidence=0.72,
+                       offered_odd=1.8, ev_percent=11.1, confidence=0.85,
                        reasoning="Teste")
 
 

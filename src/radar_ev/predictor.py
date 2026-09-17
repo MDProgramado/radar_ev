@@ -34,6 +34,7 @@ logger = structlog.get_logger(__name__)
 DEFAULT_CORNERS_AVG = 5.0  # Média mundial aproximada de escanteios por time
 DEFAULT_CARDS_AVG = 2.0    # Média mundial aproximada de cartões por time
 DEFAULT_SHOTS_AVG = 12.0   # Média mundial aproximada de finalizações por time
+DEFAULT_GOALS_AVG = 1.5    # Média mundial aproximada de gols por time
 
 
 # =============================================================================
@@ -163,25 +164,61 @@ def estimate_total_cards(
     return base
 
 
+def estimate_total_goals(
+    home_avg_for: float,
+    away_avg_against: float,
+    away_avg_for: float,
+    home_avg_against: float,
+) -> float:
+    """Estima o λ total de gols usando o modelo Dixon-Coles Simplificado.
+
+    Em vez de usar uma média global fixa (ex: 1.5), calcula um Baseline Dinâmico
+    (Localized Baseline) baseado na média móvel do contexto dos dois times. Isso
+    corrige a distorção entre ligas super ofensivas (Premier League) e ligas 
+    truncadas (Série B).
+    """
+    # Auto-ajuste de Baseline: Média dos gols marcados e sofridos pelos dois times
+    # Isso simula a média da liga para este contexto específico.
+    localized_baseline = (home_avg_for + home_avg_against + away_avg_for + away_avg_against) / 4.0
+    
+    # Se os times não têm dados, cai para a média global conservadora
+    baseline = localized_baseline if localized_baseline > 0.5 else 1.5 
+
+    # Forças Relativas
+    home_attack_strength = home_avg_for / baseline if baseline > 0 else 1.0
+    home_defense_strength = home_avg_against / baseline if baseline > 0 else 1.0
+    
+    away_attack_strength = away_avg_for / baseline if baseline > 0 else 1.0
+    away_defense_strength = away_avg_against / baseline if baseline > 0 else 1.0
+    
+    # Gols Esperados = Ataque * Defesa do Adversário * Baseline
+    exp_home_goals = home_attack_strength * away_defense_strength * baseline
+    exp_away_goals = away_attack_strength * home_defense_strength * baseline
+    
+    # Vantagem do Mandante (Home Advantage) ~15% em Gols
+    exp_home_goals *= 1.15
+    exp_away_goals *= 0.85
+    
+    return exp_home_goals + exp_away_goals
+
+
 # =============================================================================
 # Extração de Estatísticas da API-Football
 # =============================================================================
 
 def extract_corners_stats(stats_data: dict) -> dict:
-    """Extrai médias de escanteios da resposta da API-Football (/teams/statistics).
-
-    A estrutura esperada da API é:
-        response.corners.for.average.total
-        response.corners.against.average.total
+    """Extrai médias de escanteios da resposta da API-Football.
 
     Args:
-        stats_data: Resposta completa da API-Football para /teams/statistics.
+        stats_data: Resposta completa do endpoint /teams/statistics.
 
     Returns:
         Dicionário com chaves 'avg_for' e 'avg_against'.
     """
     try:
-        response = stats_data.get("response", stats_data)
+        response = stats_data.get("response", {})
+        if isinstance(response, list):
+            response = response[0] if response else {}
 
         # Navega na estrutura da API-Football
         corners = response.get("corners", {})
@@ -221,7 +258,10 @@ def extract_cards_stats(stats_data: dict) -> dict:
         Dicionário com chave 'avg_total'.
     """
     try:
-        response = stats_data.get("response", stats_data)
+        response = stats_data.get("response", {})
+        if isinstance(response, list):
+            response = response[0] if response else {}
+            
         cards = response.get("cards", {})
         fixtures_played = int(
             response.get("fixtures", {}).get("played", {}).get("total", 1) or 1
@@ -239,7 +279,8 @@ def extract_cards_stats(stats_data: dict) -> dict:
             if isinstance(interval_data, dict):
                 total_red += int(interval_data.get("total", 0) or 0)
 
-        total_cards = total_yellow + total_red
+        # Regra de Liquidação Betano: Cartão Amarelo = 1, Cartão Vermelho = 2
+        total_cards = total_yellow + (total_red * 2)
         avg_total = total_cards / max(fixtures_played, 1)
 
         return {"avg_total": avg_total}
@@ -251,6 +292,31 @@ def extract_cards_stats(stats_data: dict) -> dict:
             fallback=DEFAULT_CARDS_AVG,
         )
         return {"avg_total": DEFAULT_CARDS_AVG}
+
+
+def extract_goals_stats(stats_data: dict) -> dict:
+    """Extrai médias de gols marcados e sofridos.
+    """
+    try:
+        response = stats_data.get("response", {})
+        if isinstance(response, list):
+            response = response[0] if response else {}
+            
+        goals = response.get("goals", {})
+        
+        # 'for' e 'against' têm médias em string.
+        avg_for = float(goals.get("for", {}).get("average", {}).get("total", DEFAULT_GOALS_AVG) or DEFAULT_GOALS_AVG)
+        avg_against = float(goals.get("against", {}).get("average", {}).get("total", DEFAULT_GOALS_AVG) or DEFAULT_GOALS_AVG)
+        
+        return {"avg_for": avg_for, "avg_against": avg_against}
+
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning(
+            "goals_stats_extraction_failed",
+            error=str(exc),
+            fallback=DEFAULT_GOALS_AVG,
+        )
+        return {"avg_for": DEFAULT_GOALS_AVG, "avg_against": DEFAULT_GOALS_AVG}
 
 
 # =============================================================================
@@ -422,6 +488,73 @@ async def make_cards_prediction(
             probability=0.50,
             fair_odd=2.0,
             model_version="poisson_cards_v1_fallback",
+        )
+
+
+async def make_goals_prediction(
+    match_id: int,
+    home_team_id: int,
+    away_team_id: int,
+    league_id: int,
+    season: int,
+    football_api: object,
+    threshold: float = 2.5,
+    is_over: bool = True,
+) -> Prediction:
+    """Gera predição de gols (Over/Under) usando Poisson Avançado.
+    """
+    market_str = "over" if is_over else "under"
+    log = logger.bind(match_id=match_id, market=f"goals_{market_str}_{threshold}")
+
+    try:
+        home_stats = await football_api.get_team_statistics(home_team_id, league_id, season)
+        away_stats = await football_api.get_team_statistics(away_team_id, league_id, season)
+
+        home_goals = extract_goals_stats(home_stats)
+        away_goals = extract_goals_stats(away_stats)
+
+        lambda_total = estimate_total_goals(
+            home_avg_for=home_goals["avg_for"],
+            away_avg_against=away_goals["avg_against"],
+            away_avg_for=away_goals["avg_for"],
+            home_avg_against=home_goals["avg_against"],
+        )
+
+        k = int(threshold) # 2.5 -> k=2
+        
+        if is_over:
+            # Over 2.5 = P(X > 2) = P(X >= 3)
+            prob = poisson_prob_over_k(lambda_total, k)
+        else:
+            # Under 2.5 = P(X <= 2) = P(X < 3) -> usamos poisson_prob_under_k(lambda, k+1)
+            prob = poisson_prob_under_k(lambda_total, k + 1)
+            
+        prob = max(0.01, min(0.99, prob))
+        fair_odd = 1.0 / prob
+
+        log.info(
+            "goals_prediction_made",
+            probability=round(prob, 4),
+            fair_odd=round(fair_odd, 2),
+            lambda_total=round(lambda_total, 2)
+        )
+
+        return Prediction(
+            match_id=match_id,
+            market=f"goals_{market_str}_{threshold}",
+            probability=round(prob, 4),
+            fair_odd=round(fair_odd, 2),
+            model_version="poisson_goals_v2",
+        )
+
+    except Exception as exc:
+        log.error("goals_prediction_failed", error=str(exc))
+        return Prediction(
+            match_id=match_id,
+            market=f"goals_{market_str}_{threshold}",
+            probability=0.50,
+            fair_odd=2.0,
+            model_version="poisson_goals_v2_fallback",
         )
 
 

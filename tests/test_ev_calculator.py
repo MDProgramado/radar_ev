@@ -10,28 +10,34 @@ from datetime import datetime, timedelta, timezone
 
 class TestCalculateEV:
     def test_positive_ev(self):
-        pred = Prediction(match_id=1, market="corners", probability=0.48,
-                          fair_odd=2.08, model_version="v1")
-        ev = calculate_ev(pred, 1.85)
-        assert ev > 0  # 2.08 > 1.85
+        # prob = 0.60 (60% de bater), odd = 2.00 (esperado 1.66)
+        # EV = (0.60 * 2.00) - 1.0 = 0.20 = 20%
+        pred = Prediction(match_id=1, market="corners", probability=0.60,
+                          fair_odd=1.66, model_version="v1")
+        ev = calculate_ev(pred, 2.00)
+        assert ev > 0  # 20.0 > 0
 
     def test_negative_ev(self):
-        pred = Prediction(match_id=1, market="corners", probability=0.58,
-                          fair_odd=1.72, model_version="v1")
-        ev = calculate_ev(pred, 1.85)
-        assert ev < 0  # 1.72 < 1.85
+        # prob = 0.40, odd = 2.00
+        # EV = (0.40 * 2.00) - 1.0 = -0.20 = -20%
+        pred = Prediction(match_id=1, market="corners", probability=0.40,
+                          fair_odd=2.50, model_version="v1")
+        ev = calculate_ev(pred, 2.00)
+        assert ev < 0
 
     def test_zero_ev(self):
-        pred = Prediction(match_id=1, market="corners", probability=0.54,
-                          fair_odd=1.85, model_version="v1")
-        ev = calculate_ev(pred, 1.85)
+        # prob = 0.50, odd = 2.00
+        # EV = (0.50 * 2.00) - 1.0 = 0
+        pred = Prediction(match_id=1, market="corners", probability=0.50,
+                          fair_odd=2.00, model_version="v1")
+        ev = calculate_ev(pred, 2.00)
         assert abs(ev) < 0.01  # ~0%
 
     def test_formula_correctness(self):
         pred = Prediction(match_id=1, market="test", probability=0.5,
-                          fair_odd=2.10, model_version="v1")
-        ev = calculate_ev(pred, 1.85)
-        expected = (2.10 - 1.85) / 1.85 * 100
+                          fair_odd=2.00, model_version="v1")
+        ev = calculate_ev(pred, 2.50)
+        expected = (0.5 * 2.50 - 1.0) * 100
         assert abs(ev - expected) < 0.01
 
     def test_zero_offered_odd(self):

@@ -66,7 +66,15 @@ class FootballAPICollector:
             "timezone": "America/Sao_Paulo",
         }
 
-        data = await self.client.get(endpoint, params=params)
+        # Usa cache para fixtures (salva por 4 horas para economizar limites da API)
+        from radar_ev.cache import cache
+        cache_key = f"fixtures_{params['date']}"
+        data = await cache.get(cache_key)
+        
+        if not data:
+            data = await self.client.get(endpoint, params=params)
+            if data and data.get("response"):
+                await cache.set(cache_key, data, ttl_hours=4)
         matches: List[Match] = []
 
         for fixture in data.get("response", []):

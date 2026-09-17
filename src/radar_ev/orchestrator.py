@@ -66,15 +66,44 @@ LIGAS_INTERESSE = [
     # Competições internacionais
     "UEFA Champions League",
     "UEFA Europa League",
+    "CONMEBOL Libertadores",
+    "CONMEBOL Sudamericana",
     "Copa Libertadores",
     "Copa Sudamericana",
 ]
 
 # Mercados que o predictor Poisson suporta atualmente
 SUPPORTED_MARKETS = {
-    "corners": ["corners_over_9.5", "corners_over_10.5", "corners_over_8.5"],
-    "cards": ["cards_over_4.5", "cards_over_5.5", "cards_over_3.5"],
+    "corners": ["Mais Escanteios (Partida Completa)", "Menos Escanteios (Partida Completa)"],
+    "cards": ["Mais Cartões (Partida Completa)", "Menos Cartões (Partida Completa)"],
+    "goals": ["Mais Gols (Partida Completa)", "Menos Gols (Partida Completa)"],
 }
+
+def format_market_name(market: str) -> str:
+    """Transforma o nome técnico do mercado em algo amigável para o usuário."""
+    import re
+    market_lower = market.lower()
+    
+    # Extrai o número (ex: 9.5)
+    match = re.search(r"(\d+\.?\d*)", market_lower)
+    threshold = match.group(1) if match else "X"
+    
+    if "corner" in market_lower:
+        if "under" in market_lower and "over" not in market_lower.split("under")[-1]: 
+            return f"Menos de {threshold} Escanteios (Partida Completa)"
+        return f"Mais de {threshold} Escanteios (Partida Completa)"
+        
+    elif "card" in market_lower:
+        if "under" in market_lower:
+            return f"Menos de {threshold} Cartões (Partida Completa)"
+        return f"Mais de {threshold} Cartões (Partida Completa)"
+        
+    elif "goal" in market_lower:
+        if "under" in market_lower:
+            return f"Menos de {threshold} Gols (Partida Completa)"
+        return f"Mais de {threshold} Gols (Partida Completa)"
+        
+    return market.replace("_", " ").title()
 
 # =============================================================================
 # Rate Limit Control
@@ -106,8 +135,18 @@ async def _run_mock_pipeline() -> List[Opportunity]:
             pred = get_mock_prediction(match.id, odds.market)
             ev = calculate_ev(pred, odds.odd_value)
 
+            market_amigavel = format_market_name(odds.market)
+            odds.market = market_amigavel
+            pred.market = market_amigavel
+
             if ev >= settings.min_ev_percent:
-                opp = create_opportunity(match, pred, odds, ev)
+                opp = create_opportunity(
+                    match=match,
+                    prediction=pred, 
+                    odds=odds, 
+                    ev_percent=ev,
+                    reasoning="Análise Estatística Avançada (Poisson)"
+                )
                 ok, reason = apply_all_rules(
                     opp, settings.derby_teams_list, min_motivation=7.0
                 )
@@ -159,10 +198,19 @@ async def _run_real_pipeline() -> List[Opportunity]:
     rate_limit_hits = 0
 
     async with FootballAPICollector() as football:
-        # 1. Busca partidas do dia
+        # 1. Busca partidas (hoje e próximos dias dependendo da janela)
         today = datetime.now(timezone.utc)
-        all_matches = await football.get_today_matches(today)
-        print(f"📅 Encontradas {len(all_matches)} partidas hoje ({today.strftime('%Y-%m-%d')}).")
+        all_matches = []
+        
+        from datetime import timedelta
+        days_to_check = max(1, int(settings.pre_match_hours / 24) + 1)
+        
+        for d in range(days_to_check):
+            target_date = today + timedelta(days=d)
+            matches_for_day = await football.get_today_matches(target_date)
+            all_matches.extend(matches_for_day)
+            
+        print(f"📅 Encontradas {len(all_matches)} partidas nos próximos {days_to_check} dia(s).")
 
         # 2. Filtra por ligas de interesse e janela de operação
         filtered_matches = _filter_matches(all_matches)
@@ -251,18 +299,22 @@ async def _process_match_odds(
         # Calcula EV
         ev = calculate_ev(pred, odds.odd_value)
 
+        market_amigavel = format_market_name(odds.market)
+        odds.market = market_amigavel
+        pred.market = market_amigavel
+
         if ev >= settings.min_ev_percent:
             opp = create_opportunity(
                 match=match,
                 prediction=pred,
                 odds=odds,
                 ev_percent=ev,
-                reasoning=f"Modelo {pred.model_version} — λ estimado via estatísticas históricas",
+                reasoning="Análise Estatística Avançada (Poisson)",
             )
 
-            # Aplica regras de negócio
+            # Aplica regras de negócio (Motivação 0.0 pois não temos o scraper integrado ainda)
             ok, reason = apply_all_rules(
-                opp, settings.derby_teams_list, min_motivation=7.0
+                opp, settings.derby_teams_list, min_motivation=0.0
             )
 
             if ok:
@@ -319,9 +371,17 @@ async def _get_prediction_for_market(
     ])
 
     if not has_ids:
-        # Sem IDs, usa predição mock como fallback
-        from radar_ev.mock_data import get_mock_prediction
-        return get_mock_prediction(match.id, market)
+        # Sem IDs para buscar estatísticas, não podemos analisar seriamente.
+        return None
+
+    # -------------------------------------------------------------
+    # FILTRO DE SEGURANÇA: REJEITAR MERCADOS SECUNDÁRIOS
+    # O modelo Poisson do Radar+EV calcula a probabilidade da PARTIDA INTEIRA.
+    # Portanto, ignoramos mercados de 1º tempo, times específicos, asiáticos, etc.
+    # -------------------------------------------------------------
+    termos_proibidos = ["1st", "2nd", "half", "home", "away", "team", "casa", "fora", "primeiro", "segundo", "asian", "asiatico"]
+    if any(termo in market_lower for termo in termos_proibidos):
+        return None
 
     # Detecta tipo de mercado e limiar
     if "corner" in market_lower:
@@ -350,11 +410,27 @@ async def _get_prediction_for_market(
             threshold=threshold,
         )
 
+    elif "goals" in market_lower and ("over" in market_lower or "under" in market_lower):
+        threshold = _extract_threshold(market_lower, default=2.5)
+        is_over = "over" in market_lower
+        await asyncio.sleep(RATE_LIMIT_DELAY)
+        # Import the new function dynamically or ensure it's imported at the top
+        from radar_ev.predictor import make_goals_prediction
+        return await make_goals_prediction(
+            match_id=match.id,
+            home_team_id=match.home_team_id,
+            away_team_id=match.away_team_id,
+            league_id=match.league_id,
+            season=match.season,
+            football_api=football_api,
+            threshold=threshold,
+            is_over=is_over,
+        )
+
     else:
-        # Mercado não suportado pelo Poisson (ex: match_winner, goals)
-        # Usa mock como fallback temporário
-        from radar_ev.mock_data import get_mock_prediction
-        return get_mock_prediction(match.id, market)
+        # Mercado não suportado pelo Poisson (ex: gols, match_winner).
+        # Em vez de retornar dados falsos (mock), simplesmente ignoramos o mercado.
+        return None
 
 
 def _extract_threshold(market_name: str, default: float = 9.5) -> float:

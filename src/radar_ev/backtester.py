@@ -6,9 +6,21 @@ métricas de desempenho do sistema para provar lucratividade ao longo do tempo.
 """
 
 import sqlite3
+from pathlib import Path
 
 def run_backtest(db_path: str = "data/history.db"):
     """Lê os dados do banco de dados e exibe um relatório financeiro."""
+    
+    # Verifica se o arquivo ou diretório existe antes de tentar abrir
+    if not Path(db_path).exists():
+        print("============================================================")
+        print("📈 RELATÓRIO DE BACKTESTING - RADAR +EV")
+        print("============================================================")
+        print("Nenhum dado histórico encontrado. O sistema precisa rodar e")
+        print("salvar oportunidades no banco de dados primeiro.")
+        print("Execute o orquestrador ao menos uma vez: python -m radar_ev.orchestrator --mock")
+        return
+
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row

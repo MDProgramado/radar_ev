@@ -72,7 +72,7 @@ class Database:
                 opp.ev_percent,
                 opp.confidence,
                 stake,
-                opp.timestamp.isoformat(),
+                opp.created_at.isoformat(),
                 opp.match.datetime.isoformat(),
             ))
             conn.commit()

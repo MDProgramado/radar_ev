@@ -103,13 +103,21 @@ class HTTPClient:
                 )
 
             response.raise_for_status()
+            
+            data = response.json()
+            
+            # API-Football retorna 200 OK mas com erro de limite no JSON (Soft Rate Limit)
+            errors = data.get("errors", {})
+            if isinstance(errors, dict) and ("requests" in errors or "rateLimit" in errors):
+                log.warning("rate_limit_hit", errors=errors)
+                raise RateLimitError(f"Rate limit da API atingido: {errors}")
 
             log.info(
                 "http_request_success",
                 status=response.status_code,
                 url=str(response.url),
             )
-            return response.json()
+            return data
 
         except httpx.TimeoutException:
             log.error("http_timeout", url=endpoint)

@@ -13,26 +13,29 @@ def calculate_ev(prediction: Prediction, offered_odd: float) -> float:
     """Calcula o valor esperado percentual.
 
     Fórmula:
-        EV% = (fair_odd - offered_odd) / offered_odd × 100
+        EV% = (probabilidade_real * odd_oferecida - 1) × 100
 
-    Um EV positivo indica que a odd oferecida pela casa está acima do que
-    o modelo estima como justo — ou seja, há "valor" na aposta.
+    Um EV positivo indica que a odd oferecida pela casa é alta o suficiente
+    para compensar o risco real do evento (haver valor na aposta).
 
     Args:
-        prediction: Predição do modelo com a odd justa (fair_odd).
+        prediction: Predição do modelo com a probabilidade real.
         offered_odd: Odd decimal oferecida pela casa de apostas.
 
     Returns:
         EV percentual. Positivo = oportunidade, negativo = sem valor.
 
     Example:
-        >>> pred = Prediction(match_id=1, market="corners", probability=0.55, fair_odd=1.82, model_version="v1")
-        >>> calculate_ev(pred, 1.85)
-        -1.62...  # Odd oferecida próxima da justa, sem valor significativo.
+        >>> pred = Prediction(match_id=1, market="corners", probability=0.50, fair_odd=2.00, model_version="v1")
+        >>> calculate_ev(pred, 2.50)
+        25.0  # Oportunidade com 25% de EV positivo.
     """
     if offered_odd <= 0:
-        return -100.0  # Proteção contra divisão por zero
-    return (prediction.fair_odd - offered_odd) / offered_odd * 100
+        return -100.0  # Proteção contra erro matemático
+    
+    # Cálculo real do EV: (Probabilidade de vitória * Odd Oferecida) - 1
+    ev_decimal = (prediction.probability * offered_odd) - 1.0
+    return ev_decimal * 100.0
 
 
 def calculate_kelly(probability: float, offered_odd: float, fraction: float = 0.25) -> float:

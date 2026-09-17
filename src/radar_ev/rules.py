@@ -136,6 +136,25 @@ def pre_match_filter(opp: Opportunity) -> Tuple[bool, str]:
 
 
 # =============================================================================
+# RN06 — Alta Confiança (Win-Rate focado)
+# =============================================================================
+def high_confidence_filter(
+    opp: Opportunity, min_confidence: float = 0.65
+) -> Tuple[bool, str]:
+    """Filtra oportunidades com baixa probabilidade real de bater.
+
+    Garante uma alta taxa de acerto (win-rate) focando em eventos favoritos,
+    mesmo que o EV de zebras seja tecnicamente positivo.
+    """
+    if opp.confidence < min_confidence:
+        return False, (
+            f"RN06 — Confiança baixa: {opp.confidence*100:.1f}% < {min_confidence*100:.0f}% "
+            f"({opp.market})"
+        )
+    return True, "RN06 — Confiança OK"
+
+
+# =============================================================================
 # Encadeamento de Regras
 # =============================================================================
 def apply_all_rules(
@@ -162,6 +181,7 @@ def apply_all_rules(
         lambda o: derby_mode_filter(o, derby_teams),
         bet_builder_filter,
         pre_match_filter,
+        lambda o: high_confidence_filter(o, min_confidence=0.80),  # 80% de confiança mínima para ser aprovado
     ]
 
     for rule in rules:
