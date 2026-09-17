@@ -16,16 +16,17 @@ Padrões aplicados:
 - Strategy Pattern: regras encadeadas.
 """
 
+import argparse
 import asyncio
 import re
-import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Tuple
 
 import structlog
 
 from radar_ev.alert.telegram import TelegramSender
 from radar_ev.config import settings
+from radar_ev.db import get_db_connection
 from radar_ev.ev_calculator import (
     calculate_ev,
     calculate_ev_vig_removed,
@@ -43,6 +44,10 @@ from radar_ev.predictor import (
 from radar_ev.rules import apply_all_rules
 
 logger = structlog.get_logger(__name__)
+
+# Flag em memória (não persistida): evita repetir o INFO de "resolução
+# desabilitada" a cada ciclo do daemon em modo mock (Risco 5).
+_logged_mock_resolution_disabled = False
 
 # =============================================================================
 # Ligas de interesse — a Betano normalmente cobre estas ligas
@@ -120,7 +125,6 @@ def format_market_name(market: str) -> str:
 # =============================================================================
 RATE_LIMIT_DELAY = 0.6  # Segundos entre cada chamada (≈10 req/min)
 MAX_RATE_LIMIT_RETRIES = 3
-FALLBACK_WARNING_THRESHOLD = 20.0  # % mínimo de fallback para emitir ERROR
 
 
 # =============================================================================
@@ -158,62 +162,116 @@ def _complementary_odd(market: str, odds_list: list) -> Optional[float]:
     return None
 
 
+def _find_divergent_line(market: str, odds_list: list) -> bool:
+    """Detecta se existe um resultado complementar com limiar DIVERGENTE.
+
+    Ex: avaliando "corners_over_9.5", existe "corners_under_10.5" na lista
+    (mesmo tipo, direção oposta, mas linha diferente). A casa publicou o par
+    em outra linha — sem par exato, mas candidato a interpolação futura.
+
+    Returns:
+        True se algum complemento de limiar diferente existe; False caso contrário.
+    """
+    match = MARKET_PATTERN.match(market)
+    if not match:
+        return False
+    market_type, direction, line = match.groups()
+    opposite = "under" if direction == "over" else "over"
+    for odds in odds_list:
+        other = MARKET_PATTERN.match(odds.market)
+        if (
+            other
+            and other.group(1) == market_type
+            and other.group(2) == opposite
+            and other.group(3) != line
+        ):
+            return True
+    return False
+
+
 def _calculate_ev_without_vig(
     prediction: object,
     offered_odd: float,
     market: str,
     odds_list: list,
-) -> tuple[float, bool]:
+) -> tuple[float, bool, bool]:
     """Calcula o EV usando a odd justa (sem vig) quando o par Over/Under existe.
 
     Se o mercado complementar não estiver na lista (ex: mock), cai para o EV
-    com a odd bruta e registra em log WARNING — sem quebrar o pipeline.
+    com a odd bruta e registra em log WARNING — sem quebrar o pipeline. Quando
+    existe complemento apenas com limiar divergente, marca ``limiar_divergente``
+    (contado separadamente para decidir interpolação futura).
 
     Returns:
-        Tupla ``(ev_percent, vig_removed)``.
+        Tupla ``(ev_percent, vig_removed, limiar_divergente)``.
     """
     complementary = _complementary_odd(market, odds_list)
     vig_used = complementary is not None
+    divergent = (not vig_used) and _find_divergent_line(market, odds_list)
     vig_stats.record(vig_used)
+    if divergent:
+        vig_stats.record_divergent()
     if vig_used:
-        return calculate_ev_vig_removed(prediction, offered_odd, complementary), True
+        return calculate_ev_vig_removed(prediction, offered_odd, complementary), True, False
     logger.warning(
         "complementary_odd_not_found",
         match_id=getattr(prediction, "match_id", None),
         market=market,
         fallback="raw_odd",
+        limiar_divergente=divergent,
     )
-    return calculate_ev(prediction, offered_odd), False
+    return calculate_ev(prediction, offered_odd), False, divergent
 
 
-def _report_fallback_alert(stats=None, threshold: float = FALLBACK_WARNING_THRESHOLD) -> Optional[str]:
-    """Avalia a taxa de fallback e loga ERROR se exceder o limiar.
+def _report_fallback_alert(
+    stats=None,
+    threshold: Optional[float] = None,
+    level: Optional[str] = None,
+    in_mock: bool = False,
+) -> Optional[str]:
+    """Avalia a taxa de fallback e loga alerta se exceder o limiar.
 
-    Mensagem monitorável em produção: quando a coleta de pares Over/Under
-    falha com frequência, o EV volta a usar odd bruta (subestimado).
+    Nível do log vem de `settings.fallback_alert_level` (ERROR default, INFO
+    permitido). Em modo mock o alerta é SEMPRE INFO (o dado sintético não tem
+    pares, então 100% de fallback é esperado e não é alarme).
 
     Args:
         stats: Contadores de vig (default: singleton global).
-        threshold: % de fallback que dispara o alerta (default 20%).
+        threshold: % de fallback que dispara o alerta (default de settings).
+        level: Nível do log (default de settings; 'ERROR' ou 'INFO').
+        in_mock: True quando o pipeline rodou com dados mockados.
 
     Returns:
         Mensagem de alerta (exibível no console) ou None se abaixo do limiar.
     """
     if stats is None:
         stats = vig_stats
+    if threshold is None:
+        threshold = settings.fallback_warning_threshold
     if stats.total == 0 or stats.fallback_percent <= threshold:
         return None
+
     message = (
         f"ALERTA: {stats.fallback_percent:.1f}% das oportunidades usaram odd bruta "
         "(sem remoção de vig). Verificar coleta de pares Over/Under."
     )
-    logger.error(
-        "vig_fallback_alert",
-        message=message,
-        fallback_percent=round(stats.fallback_percent, 1),
-        with_vig=stats.with_vig,
-        fallback=stats.fallback,
-    )
+    log_level = (level or settings.fallback_alert_level).upper()
+    if in_mock or log_level == "INFO":
+        logger.info(
+            "vig_fallback_alert",
+            message=message,
+            fallback_percent=round(stats.fallback_percent, 1),
+            with_vig=stats.with_vig,
+            fallback=stats.fallback,
+        )
+    else:
+        logger.error(
+            "vig_fallback_alert",
+            message=message,
+            fallback_percent=round(stats.fallback_percent, 1),
+            with_vig=stats.with_vig,
+            fallback=stats.fallback,
+        )
     return message
 
 
@@ -272,7 +330,7 @@ async def _run_mock_pipeline() -> List[Opportunity]:
         odds_list = get_mock_odds(match.id)
         for odds in odds_list:
             pred = get_mock_prediction(match.id, odds.market)
-            ev, vig_used = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
+            ev, vig_used, vig_divergente = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
 
             market_amigavel = format_market_name(odds.market)
             odds.market = market_amigavel
@@ -286,6 +344,7 @@ async def _run_mock_pipeline() -> List[Opportunity]:
                     ev_percent=ev,
                     reasoning="Análise Estatística Avançada (Poisson)",
                     vig_removed=vig_used,
+                    vig_divergente=vig_divergente,
                 )
                 ok, reason = apply_all_rules(
                     opp, settings.derby_teams_list, min_motivation=7.0
@@ -315,7 +374,7 @@ async def _run_mock_pipeline() -> List[Opportunity]:
 # =============================================================================
 # Pipeline Real (API)
 # =============================================================================
-async def _run_real_pipeline() -> List[Opportunity]:
+async def _run_real_pipeline(league_filter: Optional[str] = None) -> List[Opportunity]:
     """Executa o pipeline com dados reais da API-Football.
 
     Fluxo:
@@ -325,6 +384,10 @@ async def _run_real_pipeline() -> List[Opportunity]:
     4. Para cada odd: gera predição Poisson e calcula EV.
     5. Se EV >= limiar: aplica regras de negócio.
     6. Se aprovado: cria Opportunity.
+
+    Args:
+        league_filter: Se informado (--league), restringe as partidas a essa
+            liga exata em vez da whitelist ``LIGAS_INTERESSE``.
 
     Returns:
         Lista de oportunidades encontradas.
@@ -339,21 +402,12 @@ async def _run_real_pipeline() -> List[Opportunity]:
 
     async with FootballAPICollector() as football:
         # 1. Busca partidas (hoje e próximos dias dependendo da janela)
-        today = datetime.now(timezone.utc)
-        all_matches = []
-        
-        from datetime import timedelta
+        all_matches = await _fetch_future_matches(football)
         days_to_check = max(1, int(settings.pre_match_hours / 24) + 1)
-        
-        for d in range(days_to_check):
-            target_date = today + timedelta(days=d)
-            matches_for_day = await football.get_today_matches(target_date)
-            all_matches.extend(matches_for_day)
-            
         print(f"📅 Encontradas {len(all_matches)} partidas nos próximos {days_to_check} dia(s).")
 
         # 2. Filtra por ligas de interesse e janela de operação
-        filtered_matches = _filter_matches(all_matches)
+        filtered_matches = _filter_matches(all_matches, league_filter)
         print(f"🎯 {len(filtered_matches)} partidas após filtro (ligas + janela).\n")
 
         if not filtered_matches:
@@ -437,7 +491,7 @@ async def _process_match_odds(
             continue
 
         # Calcula EV
-        ev, vig_used = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
+        ev, vig_used, vig_divergente = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
 
         market_amigavel = format_market_name(odds.market)
         odds.market = market_amigavel
@@ -451,6 +505,7 @@ async def _process_match_odds(
                 ev_percent=ev,
                 reasoning="Análise Estatística Avançada (Poisson)",
                 vig_removed=vig_used,
+                vig_divergente=vig_divergente,
             )
 
             # Aplica regras de negócio (Motivação 0.0 pois não temos o scraper integrado ainda)
@@ -586,11 +641,22 @@ def _extract_threshold(market_name: str, default: float = 9.5) -> float:
     return default
 
 
-def _filter_matches(matches: List[Match]) -> List[Match]:
+def _top_leagues(matches: List[Match], top_n: int = 10) -> List[dict]:
+    """Top ligas por número de partidas (para sugestão no --league)."""
+    counts: dict = {}
+    for match in matches:
+        counts[match.league] = counts.get(match.league, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"name": name, "count": count} for name, count in ranked[:top_n]]
+
+
+def _filter_matches(matches: List[Match], league_filter: Optional[str] = None) -> List[Match]:
     """Filtra partidas por ligas de interesse e janela de operação.
 
     Args:
         matches: Lista completa de partidas do dia.
+        league_filter: Se informado (--league), mantém APENAS partidas dessa
+            liga exata, em vez da whitelist ``LIGAS_INTERESSE``.
 
     Returns:
         Lista filtrada de partidas relevantes.
@@ -599,8 +665,11 @@ def _filter_matches(matches: List[Match]) -> List[Match]:
     filtered = []
 
     for match in matches:
-        # Verifica se a liga é de interesse
-        if match.league not in LIGAS_INTERESSE:
+        # Verifica se a liga é de interesse (ou filtro explícito)
+        if league_filter is not None:
+            if match.league != league_filter:
+                continue
+        elif match.league not in LIGAS_INTERESSE:
             continue
 
         # Verifica janela de operação (pré-match)
@@ -612,17 +681,87 @@ def _filter_matches(matches: List[Match]) -> List[Match]:
 
         filtered.append(match)
 
+    # Alerta operacional (Risco 4): nome de liga digitado errado → 0 matches.
+    # Lista as ligas disponíveis NESTE run como sugestão.
+    if league_filter is not None and not filtered:
+        message = (
+            f"Nenhum match encontrado para --league='{league_filter}'. "
+            "Verifique o nome exato da liga na API."
+        )
+        logger.warning(
+            "league_filter_no_matches",
+            league=league_filter,
+            suggestions=[c["name"] for c in _top_leagues(matches)],
+            message=message,
+        )
+        print(f"⚠️ {message}")
+        suggestions = _top_leagues(matches, top_n=10)
+        if suggestions:
+            print("Ligas disponíveis neste run (top 10):")
+            for rank, item in enumerate(suggestions, 1):
+                print(f"  {rank}. {item['name']} ({item['count']} matches)")
+
     return filtered
+
+
+async def _fetch_future_matches(football, days_to_check: Optional[int] = None) -> List[Match]:
+    """Busca partidas da janela de operação (hoje + dias) via API."""
+    days_to_check = days_to_check or max(1, int(settings.pre_match_hours / 24) + 1)
+    today = datetime.now(timezone.utc)
+    all_matches: List[Match] = []
+    for d in range(days_to_check):
+        target_date = today + timedelta(days=d)
+        matches_for_day = await football.get_today_matches(target_date)
+        all_matches.extend(matches_for_day)
+    return all_matches
+
+
+async def _list_leagues(use_mock: bool = False, league_filter: Optional[str] = None) -> None:
+    """Lista as ligas disponíveis (modo --list-leagues) e não roda o pipeline.
+
+    Em modo real usa a mesma janela/busca do pipeline; em mock usa os times
+    mockados. Se um ``--league`` for passado junto, o filtro é aplicado para
+    confirmar o nome antes de sair.
+    """
+    if use_mock:
+        from radar_ev.mock_data import get_mock_matches
+
+        matches = get_mock_matches()
+    else:
+        from radar_ev.collectors.football_api import FootballAPICollector
+
+        async with FootballAPICollector() as football:
+            matches = await _fetch_future_matches(football)
+
+    if league_filter is not None:
+        filtered = [m for m in matches if m.league == league_filter]
+        if not filtered:
+            _filter_matches(matches, league_filter=league_filter)
+        else:
+            print(f"✅ Liga '{league_filter}' encontrada: {len(filtered)} partida(s) na janela.")
+        return
+
+    top = _top_leagues(matches, top_n=10)
+    print("Ligas disponíveis (--league aceita):")
+    if not top:
+        print("  (nenhuma partida encontrada na janela)")
+    for rank, item in enumerate(top, 1):
+        print(f"  {rank}. {item['name']} ({item['count']} matches)")
 
 
 # =============================================================================
 # Entry Point
 # =============================================================================
-async def run_pipeline(use_mock: bool = False) -> List[Opportunity]:
+async def run_pipeline(
+    use_mock: bool = False,
+    league_filter: Optional[str] = None,
+) -> List[Opportunity]:
     """Executa o pipeline completo do Radar +EV.
 
     Args:
         use_mock: Se True, usa dados fictícios. Se False, usa APIs reais.
+        league_filter: Se informado (--league), restringe as partidas a essa
+            liga exata (modo real).
 
     Returns:
         Lista de oportunidades encontradas.
@@ -653,7 +792,7 @@ async def run_pipeline(use_mock: bool = False) -> List[Opportunity]:
         if use_mock:
             opportunities = await _run_mock_pipeline()
         else:
-            opportunities = await _run_real_pipeline()
+            opportunities = await _run_real_pipeline(league_filter=league_filter)
 
         # Resumo
         print()
@@ -667,7 +806,7 @@ async def run_pipeline(use_mock: bool = False) -> List[Opportunity]:
                 f"🔎 Vig: {vig_stats.with_vig} com par ({vig_stats.vig_percent:.1f}%) | "
                 f"{vig_stats.fallback} fallback ({vig_stats.fallback_percent:.1f}%)"
             )
-        fallback_alert = _report_fallback_alert()
+        fallback_alert = _report_fallback_alert(in_mock=use_mock)
         if fallback_alert:
             print(f"🔔 {fallback_alert}")
 
@@ -699,42 +838,214 @@ async def run_pipeline(use_mock: bool = False) -> List[Opportunity]:
         return []
 
 
-def main() -> None:
-    """Entry point para execução via CLI ou Poetry script."""
-    # Verifica argumento de linha de comando
-    use_mock = "--mock" in sys.argv or "-m" in sys.argv
-    run_daemon = "--daemon" in sys.argv or "-d" in sys.argv
+def _count_resolved(resolver, pending_rows: list) -> dict:
+    """Conta o desfecho dos PENDING após a resolução, em 4 categorias.
 
-    if "--help" in sys.argv or "-h" in sys.argv:
-        print("Radar +EV — Sistema de Recomendação Pré-Jogo")
-        print()
-        print("Uso: python -m radar_ev.orchestrator [opções]")
-        print()
-        print("Opções:")
-        print("  --mock, -m    Usar dados mockados (sem API real)")
-        print("  --daemon, -d  Executar continuamente em loop infinito (para nuvem/Docker)")
-        print("  --help, -h    Mostrar esta ajuda")
-        sys.exit(0)
+    Categorias:
+    - ``greens``: RESOLVED com ``result_won == 1`` (GREEN).
+    - ``reds``: RESOLVED com ``result_won == 0`` (RED).
+    - ``nulls``: RESOLVED mas ``result_won IS NULL`` (cancelado/adiado/dado
+      incompleto — NÃO conta como RED, para não inflar a taxa de perda).
+    - ``still_pending``: continuam sem RESOLVED.
 
-    async def _daemon_loop():
-        print("🚀 Iniciando Radar +EV em modo DAEMON (Loop Contínuo)...")
-        while True:
-            try:
-                await run_pipeline(use_mock=use_mock)
-                print(f"⏳ Aguardando 1 hora para o próximo ciclo...")
-                await asyncio.sleep(3600)  # 1 hora
-            except KeyboardInterrupt:
-                print("🛑 Daemon interrompido pelo usuário.")
-                break
-            except Exception as e:
-                print(f"💥 Erro no daemon: {e}")
-                print(f"⏳ Tentando novamente em 5 minutos...")
-                await asyncio.sleep(300)
+    Returns:
+        Dict com essas 4 contagens.
+    """
+    ids = [row["id"] for row in pending_rows]
+    if not ids:
+        return {"greens": 0, "reds": 0, "nulls": 0, "still_pending": 0}
+    placeholders = ",".join("?" * len(ids))
+    with get_db_connection(resolver.db_path) as conn:
+        row = conn.execute(
+            f"SELECT "
+            f"SUM(CASE WHEN status = 'RESOLVED' AND result_won = 1 THEN 1 ELSE 0 END) AS greens, "
+            f"SUM(CASE WHEN status = 'RESOLVED' AND result_won = 0 THEN 1 ELSE 0 END) AS reds, "
+            f"SUM(CASE WHEN status = 'RESOLVED' AND result_won IS NULL THEN 1 ELSE 0 END) AS nulls, "
+            f"SUM(CASE WHEN status != 'RESOLVED' THEN 1 ELSE 0 END) AS still_pending "
+            f"FROM opportunities WHERE id IN ({placeholders})",
+            ids,
+        ).fetchone()
+    return {
+        "greens": row["greens"] or 0,
+        "reds": row["reds"] or 0,
+        "nulls": row["nulls"] or 0,
+        "still_pending": row["still_pending"] or 0,
+    }
 
-    if run_daemon:
-        asyncio.run(_daemon_loop())
+
+async def _run_result_resolution() -> dict:
+    """Resolve oportunidades PENDING via result_resolver e loga estruturado.
+
+    O resolver já envia o relatório diário ao Telegram internamente quando há
+    resoluções. Aqui apenas medimos PENDING/GREEN/RED/NULL para telemetria,
+    e emitimos WARNING se a taxa de RESOLVED indeterminados (NULL) exceder o
+    limiar de settings (default 5%).
+
+    Returns:
+        Dict com as contagens ``{pending, greens, reds, nulls, still_pending}``.
+    """
+    from radar_ev.result_resolver import ResultResolver
+
+    resolver = ResultResolver()
+    pending_rows = resolver.get_pending_opportunities()
+    pending = len(pending_rows)
+    logger.info("result_resolution_started", pending=pending)
+    print(f"🔍 Resultados: {pending} oportunidade(s) PENDING encontrada(s).")
+    if pending == 0:
+        return {"pending": 0, "greens": 0, "reds": 0, "nulls": 0, "still_pending": 0}
+
+    await resolver.resolve_all()
+
+    counts = _count_resolved(resolver, pending_rows)
+    resolved = counts["greens"] + counts["reds"] + counts["nulls"]
+    null_percent = (counts["nulls"] * 100.0 / resolved) if resolved else 0.0
+    logger.info(
+        "result_resolution_summary",
+        pending=pending,
+        greens=counts["greens"],
+        reds=counts["reds"],
+        nulls=counts["nulls"],
+        still_pending=counts["still_pending"],
+        resolved=resolved,
+    )
+    if resolved and null_percent > settings.result_resolution_null_threshold:
+        message = (
+            f"{null_percent:.1f}% das resoluções ficaram indeterminadas (NULL). "
+            "Verificar cancelamentos/adiamentos."
+        )
+        logger.warning(
+            "result_resolution_null_high",
+            nulls=counts["nulls"],
+            resolved=resolved,
+            null_percent=round(null_percent, 1),
+            message=message,
+        )
+        print(f"⚠️ {message}")
+    print(
+        f"✅ Resolvidas: {resolved} (GREEN={counts['greens']} RED={counts['reds']} "
+        f"NULL={counts['nulls']})."
+    )
+    return {"pending": pending, "resolved": resolved, **counts}
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Constrói o parser do CLI (argparse) do orchestrator."""
+    parser = argparse.ArgumentParser(
+        prog="python -m radar_ev.orchestrator",
+        description="Radar +EV — Sistema de Recomendação Pré-Jogo",
+    )
+    parser.add_argument(
+        "--mock", "-m",
+        action="store_true",
+        help="Usar dados mockados (sem API real; nunca resolve resultados)",
+    )
+    parser.add_argument(
+        "--daemon", "-d",
+        action="store_true",
+        help="Executar continuamente em loop infinito (para nuvem/Docker). "
+             "Resolve resultados antes de cada ciclo",
+    )
+    parser.add_argument(
+        "--resolve", "-r",
+        action="store_true",
+        help="Executar APENAS a resolução de resultados (sem buscar jogos). "
+             "Ignorado em modo mock",
+    )
+    parser.add_argument(
+        "--no-resolve", "-nr",
+        action="store_true",
+        help="Pular a resolução de resultados no ciclo do pipeline"
+             " (principalmente para o daemon)",
+    )
+    parser.add_argument(
+        "--league", "-l",
+        type=str,
+        default=None,
+        metavar="LIGA",
+        help="Filtrar o pipeline para uma liga específica (ex: 'Premier "
+             "League'; apenas modo real)",
+    )
+    parser.add_argument(
+        "--list-leagues",
+        action="store_true",
+        help="Listar as ligas disponíveis na janela e sair (não roda o "
+             "pipeline). Combinável com --league para validar o nome",
+    )
+    return parser
+
+
+async def _daemon_loop(
+    resolve_in_cycle: bool,
+    use_mock: bool,
+    league_filter: Optional[str],
+) -> None:
+    """Loop infinito do modo daemon: resolve e depois roda o pipeline."""
+    print("🚀 Iniciando Radar +EV em modo DAEMON (Loop Contínuo)...")
+    while True:
+        try:
+            if resolve_in_cycle:
+                await _run_result_resolution()
+            await run_pipeline(use_mock=use_mock, league_filter=league_filter)
+            print(f"⏳ Aguardando 1 hora para o próximo ciclo...")
+            await asyncio.sleep(3600)  # 1 hora
+        except KeyboardInterrupt:
+            print("🛑 Daemon interrompido pelo usuário.")
+            break
+        except Exception as e:
+            print(f"💥 Erro no daemon: {e}")
+            print(f"⏳ Tentando novamente em 5 minutos...")
+            await asyncio.sleep(300)
+
+
+async def _execute_cli(args) -> None:
+    """Executa as ações do CLI num loop já existente (testável).
+
+    ``main()`` apenas faz o parse e chama ``asyncio.run(_execute_cli(args))``.
+
+    Regras de orquestração:
+    - Single-shot: NÃO resolve por padrão (só o pipeline).
+    - ``--daemon``: resolve antes de cada ciclo (exceto com ``--no-resolve``).
+    - ``--resolve``: executa APENAS a resolução e termina.
+    - Modo mock: resolução SEMPRE desabilitada (não toca o banco real).
+    """
+    use_mock = args.mock
+    run_daemon = args.daemon
+
+    # --list-leagues: apenas lista as ligas disponíveis e sai (não roda pipeline).
+    if args.list_leagues:
+        await _list_leagues(use_mock=use_mock, league_filter=args.league)
+        return
+
+    # Salvaguarda (isolação dev/prod): mock NUNCA resolve resultados. O INFO
+    # é emitido só uma vez por processo para não poluir o daemon (Risco 5).
+    global _logged_mock_resolution_disabled
+    if use_mock and (args.resolve or args.no_resolve or run_daemon):
+        if not _logged_mock_resolution_disabled:
+            logger.info(
+                "mock_resolution_disabled",
+                message="Modo mock: resolução desabilitada automaticamente.",
+            )
+            _logged_mock_resolution_disabled = True
+
+    only_resolve = args.resolve and not use_mock
+    resolve_in_cycle = run_daemon and not use_mock and not args.no_resolve
+
+    if only_resolve:
+        await _run_result_resolution()
+    elif run_daemon:
+        await _daemon_loop(
+            resolve_in_cycle=resolve_in_cycle,
+            use_mock=use_mock,
+            league_filter=args.league,
+        )
     else:
-        asyncio.run(run_pipeline(use_mock=use_mock))
+        await run_pipeline(use_mock=use_mock, league_filter=args.league)
+
+
+def main(argv: Optional[list] = None) -> None:
+    """Entry point para execução via CLI ou Poetry script."""
+    args = build_arg_parser().parse_args(argv)
+    asyncio.run(_execute_cli(args))
 
 
 if __name__ == "__main__":
