@@ -6,10 +6,10 @@ arquivo CSV (aberto nativamente no Excel). Ideal para enviar aos clientes
 como "Relatório de Transparência" e prova de lucratividade (Proof of Profit).
 """
 
-import sqlite3
 import csv
 from datetime import datetime
 from radar_ev.database import db
+from radar_ev.db import get_db_connection
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -17,7 +17,7 @@ logger = structlog.get_logger(__name__)
 def generate_csv_report(output_file: str = "relatorio_transparencia.csv"):
     """Gera um CSV com todas as apostas resolvidas e o saldo financeiro."""
     try:
-        with sqlite3.connect(db.db_path) as conn:
+        with get_db_connection(db.db_path) as conn:
             cursor = conn.cursor()
             
             # Puxa apenas os jogos que já foram resolvidos

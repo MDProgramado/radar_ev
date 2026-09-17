@@ -5,11 +5,11 @@ Salva todas as oportunidades (+EV) encontradas pelo sistema para
 permitir análises de backtesting e validação de lucratividade.
 """
 
-import sqlite3
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from radar_ev.db import get_db_connection
 from radar_ev.models import Opportunity
 
 
@@ -23,7 +23,7 @@ class Database:
 
     def _init_db(self):
         """Cria as tabelas se não existirem."""
-        with sqlite3.connect(self.db_path) as conn:
+        with get_db_connection(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS opportunities (
@@ -57,7 +57,7 @@ class Database:
 
     def save_opportunity(self, opp: Opportunity):
         """Salva uma oportunidade no banco de dados."""
-        with sqlite3.connect(self.db_path) as conn:
+        with get_db_connection(self.db_path) as conn:
             cursor = conn.cursor()
             
             # Pega o recommended_stake_percent de forma segura (fallback para 0.0)

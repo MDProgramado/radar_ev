@@ -128,6 +128,27 @@ docker run --env-file .env radar-ev python -m radar_ev.orchestrator --mock
 | `PRE_MATCH_HOURS` | Janela pré-jogo (horas) | `4` |
 | `DERBY_TEAMS` | Times derby (CSV) | `Flamengo,Fluminense,...` |
 
+### 🗄️ Banco de dados (Turso)
+
+Por padrão o sistema usa um arquivo SQLite local (`data/history.db` e
+`data/cache.db`), ideal para desenvolvimento. Em ambientes efêmeros (ex.:
+GitHub Actions), defina as variáveis abaixo para persistir os dados no
+[Turso](https://turso.tech) (SQLite na nuvem). Se qualquer uma estiver
+ausente, o fallback local é usado automaticamente — sem quebrar o dev local.
+
+| Variável | Descrição | Default |
+|----------|-----------|---------|
+| `TURSO_DATABASE_URL` | URL do banco Turso (ex.: `libsql://radar-<org>.turso.io`) | — |
+| `TURSO_AUTH_TOKEN` | Token de acesso ao Turso | — |
+
+```bash
+# Exemplo (CI/produção) — sem elas, usa data/*.db local
+export TURSO_DATABASE_URL="libsql://radar-<org>.turso.io"
+export TURSO_AUTH_TOKEN="<token>"
+```
+
+As credenciais são lidas do ambiente do processo e nunca ficam no código.
+
 ## 📝 Regras de Negócio
 
 - **RN01** — Motivação ≥ 7.0 (jogos decisivos)

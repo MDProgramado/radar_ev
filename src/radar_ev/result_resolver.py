@@ -10,9 +10,9 @@ relatório de transparência no Telegram.
 import asyncio
 from datetime import datetime, timezone, timedelta
 import structlog
-import sqlite3
 
 from radar_ev.database import db
+from radar_ev.db import get_db_connection
 from radar_ev.collectors.football_api import FootballAPICollector
 from radar_ev.alert.telegram import TelegramSender
 
@@ -32,8 +32,7 @@ class ResultResolver:
         # Um jogo de futebol dura em média 2 horas
         cutoff_time = (now - timedelta(hours=2.5)).isoformat()
         
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with get_db_connection(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM opportunities WHERE status = 'PENDING' AND match_date < ?",
@@ -172,7 +171,7 @@ class ResultResolver:
 
     def _update_opportunity(self, opp_id: int, won: bool, profit: float):
         """Atualiza a linha no banco de dados para RESOLVED."""
-        with sqlite3.connect(self.db_path) as conn:
+        with get_db_connection(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE opportunities 

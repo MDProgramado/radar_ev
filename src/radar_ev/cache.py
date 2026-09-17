@@ -6,11 +6,12 @@ para economizar chamadas de rede e não estourar o limite da API-Football.
 """
 
 import json
-import sqlite3
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from pathlib import Path
+
+from radar_ev.db import get_db_connection
 
 
 class LocalCache:
@@ -24,7 +25,12 @@ class LocalCache:
 
     def _init_db(self):
         """Inicializa as tabelas do banco de dados caso não existam."""
-        with sqlite3.connect(self.db_path) as conn:
+        # Cache sempre em SQLite LOCAL (use_turso=False), mesmo com o Turso
+        # configurado: é dado descartável/efêmero (TTL curto) e re-populável.
+        # Persistir no Turso gastaria leitura/escrita na nuvem sem ganho real;
+        # em ambientes efêmeros (GitHub Actions) o cache nasce e morre a cada
+        # execução, o que é aceitável.
+        with get_db_connection(self.db_path, use_turso=False) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS api_cache (
@@ -37,7 +43,8 @@ class LocalCache:
 
     def _get(self, key: str) -> Optional[dict]:
         """Busca síncrona no banco."""
-        with sqlite3.connect(self.db_path) as conn:
+        # Cache é local por decisão (ver comentário em _init_db).
+        with get_db_connection(self.db_path, use_turso=False) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT data, expires_at FROM api_cache WHERE key = ?", (key,))
             row = cursor.fetchone()
@@ -58,8 +65,9 @@ class LocalCache:
 
     def _set(self, key: str, data: dict, ttl_hours: int = 72):
         """Escrita síncrona no banco."""
+        # Cache é local por decisão (ver comentário em _init_db).
         expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
-        with sqlite3.connect(self.db_path) as conn:
+        with get_db_connection(self.db_path, use_turso=False) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "REPLACE INTO api_cache (key, data, expires_at) VALUES (?, ?, ?)",

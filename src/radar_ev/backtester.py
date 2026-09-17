@@ -8,11 +8,13 @@ métricas de desempenho do sistema para provar lucratividade ao longo do tempo.
 import sqlite3
 from pathlib import Path
 
+from radar_ev.db import get_db_connection, turso_configured
+
 def run_backtest(db_path: str = "data/history.db"):
     """Lê os dados do banco de dados e exibe um relatório financeiro."""
     
-    # Verifica se o arquivo ou diretório existe antes de tentar abrir
-    if not Path(db_path).exists():
+    # Verifica se o arquivo existe (modo local) antes de tentar abrir
+    if not turso_configured() and not Path(db_path).exists():
         print("============================================================")
         print("📈 RELATÓRIO DE BACKTESTING - RADAR +EV")
         print("============================================================")
@@ -22,8 +24,7 @@ def run_backtest(db_path: str = "data/history.db"):
         return
 
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_db_connection(db_path)
         cursor = conn.cursor()
         
         # Lê todas as oportunidades do banco
