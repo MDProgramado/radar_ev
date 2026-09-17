@@ -51,3 +51,15 @@ models/*.joblib
 
 # ---- Ruff ----
 .ruff_cache/
+
+# ---- Artefatos em tempo de execução ----
+telegram_fallback.txt
+MANUAL_DE_VENDAS_RADAR_EV.txt
+data/
+
+# ---- Pasta aninhada duplicada do projeto (somente na raiz) ----
+/radar_ev/
+
+# ---- Scripts de debug one-off ----
+get_specific_matches.py
+test_api_debug.py
