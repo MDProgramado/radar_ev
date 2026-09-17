@@ -1,0 +1,77 @@
+# Radar +EV — Pipeline de recomendação (GitHub Actions)
+#
+# Duas lógicas em horários distintos:
+#   - Cron '0 12,18 * * *'  →  FETCH + PREVISÃO  (busca jogos/odds e gera EV)
+#   - Cron '0 23 * * *'     →  RESOLUÇÃO apenas  (resolve PENDING via --resolve)
+#
+# A distinção é feita por `github.event.schedule` (o cron que disparou a run).
+# Execução manual (workflow_dispatch) pede a tarefa via input `TASK`.
+#
+# Conecta ao Turso para persistência remota do histórico e envia
+# oportunidades via Telegram. Nuven: 12/18 UTC = 09/15 BRT; 23 UTC = 20 BRT.
+#
+# IMPORTANTE — PYTHONPATH: usamos `poetry install --no-root` (o pacote
+# radar_ev NÃO é instalado nem no modo editable). Então, para
+# `python src/radar_ev/orchestrator.py` conseguir importar `radar_ev.*`,
+# o sistema precisa de `src/` no sys.path. Sem isso o job quebra com
+# `ModuleNotFoundError: No module named 'radar_ev.config'`.
+
+name: Radar +EV pipeline
+
+on:
+  schedule:
+    - cron: '0 12,18 * * *'   # fetch + predict (09h/15h BRT)
+    - cron: '0 23 * * *'      # resolve apenas (20h BRT)
+  workflow_dispatch:
+    inputs:
+      TASK:
+        description: 'Tarefa a executar'
+        type: choice
+        required: true
+        default: 'fetch'
+        options:
+          - fetch
+          - resolve
+
+# Evita execuções sobrepostas: se uma run ainda estiver ativa, a nova
+# aguarda a anterior terminar (não cancela a que está rodando).
+concurrency:
+  group: radar-ev-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUNBUFFERED: '1'
+      PYTHONPATH: ${{ github.workspace }}/src
+      RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'poetry'
+
+      - name: Instalar Poetry
+        run: pip install poetry==2.3.3
+
+      - name: Instalar dependências (sem instalar o pacote)
+        run: poetry install --no-root
+
+      - name: Resolver resultados (23h UTC ou manual 'resolve')
+        if: (github.event_name == 'schedule' && github.event.schedule == '0 23 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.TASK == 'resolve')
+        run: poetry run python src/radar_ev/orchestrator.py --resolve
+
+      - name: Buscar e prever (12h/18h UTC ou manual 'fetch')
+        if: (github.event_name == 'schedule' && github.event.schedule != '0 23 * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.TASK != 'resolve')
+        run: poetry run python src/radar_ev/orchestrator.py
