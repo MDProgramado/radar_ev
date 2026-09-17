@@ -6,6 +6,7 @@ import pytest
 from radar_ev.ev_calculator import (
     calculate_ev,
     calculate_ev_vig_removed,
+    calculate_kelly,
     create_opportunity,
     remove_vig,
 )
@@ -119,3 +120,56 @@ class TestCreateOpportunity:
         assert opp.match.home_team == "Palmeiras"
         assert opp.market == "corners_over_9.5"
         assert opp.confidence == sample_prediction.probability
+
+    def test_vig_removed_propagates_to_opportunity(
+        self, sample_match, sample_odds, sample_prediction
+    ):
+        opp = create_opportunity(
+            sample_match, sample_prediction, sample_odds, 13.5, vig_removed=True
+        )
+        assert opp.vig_removed is True
+        opp_fallback = create_opportunity(
+            sample_match, sample_prediction, sample_odds, 13.5, vig_removed=False
+        )
+        assert opp_fallback.vig_removed is False
+
+    def test_vig_removed_defaults_to_none(
+        self, sample_match, sample_odds, sample_prediction
+    ):
+        opp = create_opportunity(sample_match, sample_prediction, sample_odds, 13.5)
+        assert opp.vig_removed is None
+
+
+class TestKelly:
+    """Stake via Critério de Kelly Fracionário (1/4 Kelly)."""
+
+    def test_quarter_kelly_stake_with_banca_1000(self):
+        # p=0.55, odd=2.10, b=1.10
+        # f_full = (1.10×0.55 − 0.45)/1.10 ≈ 0.14091
+        # f_quarter = 0.14091 × 0.25 ≈ 0.03523 → 3.52% da banca
+        percent = calculate_kelly(0.55, 2.10)
+        assert percent == pytest.approx(3.52, abs=0.01)
+        stake = percent / 100.0 * 1000.0
+        assert stake == pytest.approx(35.23, abs=0.01)
+
+    def test_default_uses_quarter_kelly(self):
+        from radar_ev.config import settings
+
+        explicit = calculate_kelly(0.55, 2.10, fraction=0.25)
+        default = calculate_kelly(0.55, 2.10)
+        assert settings.kelly_fraction == 0.25
+        assert default == pytest.approx(explicit)
+
+    def test_full_kelly_is_four_times_quarter(self):
+        # Abaixo do cap de 5%: p=0.51, odd=2.00 → f_full=2.00%, f_quarter=0.50%
+        full = calculate_kelly(0.51, 2.00, fraction=1.0)
+        quarter = calculate_kelly(0.51, 2.00, fraction=0.25)
+        assert full == pytest.approx(quarter * 4.0)
+        assert full == pytest.approx(2.00)
+        assert quarter == pytest.approx(0.50)
+
+    def test_negative_value_returns_zero(self):
+        assert calculate_kelly(0.30, 1.10) == 0.0
+
+    def test_bad_odd_returns_zero(self):
+        assert calculate_kelly(0.55, 1.0) == 0.0

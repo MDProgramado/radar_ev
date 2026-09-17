@@ -5,14 +5,32 @@ test_orchestrator.py — Testes para o pipeline orquestrador.
 import pytest
 from unittest.mock import AsyncMock, patch
 from radar_ev.collectors.football_api import FootballAPICollector
+from radar_ev.ev_calculator import calculate_ev, calculate_ev_vig_removed
+from radar_ev.models import Match, Odds, Prediction
 from radar_ev.orchestrator import (
+    _calculate_ev_without_vig,
+    _complementary_odd,
     _filter_matches,
     _extract_threshold,
     _get_prediction_for_market,
     _parse_market,
+    _report_fallback_alert,
 )
-from radar_ev.models import Match
+from radar_ev.vig_stats import VigStats, vig_stats
 from datetime import datetime, timedelta, timezone
+
+# Roteia structlog para o logging padrão para permitir captura via caplog.
+import structlog
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.UnicodeDecoder(),
+        structlog.processors.KeyValueRenderer(sort_keys=False),
+    ],
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+)
 
 
 def _match(**kwargs):
@@ -262,3 +280,118 @@ class TestGetPredictionForMarket:
             _, kwargs = mock_pred.await_args
             assert kwargs["is_over"] is False
             assert kwargs["threshold"] == 2.5
+
+
+class TestVigFallback:
+    """Integração: par Over/Under, fallback e limiares divergentes."""
+
+    def _pred(self, prob: float = 0.55) -> Prediction:
+        return Prediction(
+            match_id=10,
+            market="corners_over_9.5",
+            probability=prob,
+            fair_odd=round(1.0 / prob, 4),
+            model_version="test",
+        )
+
+    def _odds(self, market: str, odd_value: float) -> Odds:
+        return Odds(match_id=10, market=market, odd_value=odd_value)
+
+    def test_pair_over_under_uses_vig_removed(self):
+        vig_stats.reset()
+        pred = self._pred(0.55)
+        odds_list = [
+            self._odds("corners_over_9.5", 2.10),
+            self._odds("corners_under_9.5", 1.75),
+        ]
+        ev, vig_used = _calculate_ev_without_vig(pred, 2.10, "corners_over_9.5", odds_list)
+        assert vig_used is True
+        assert ev == pytest.approx(calculate_ev_vig_removed(pred, 2.10, 1.75))
+        assert _complementary_odd("corners_over_9.5", odds_list) == 1.75
+        assert vig_stats.with_vig == 1
+        assert vig_stats.fallback == 0
+
+    def test_without_pair_falls_back_and_logs_warning(self, caplog):
+        vig_stats.reset()
+        pred = self._pred(0.55)
+        odds_list = [self._odds("corners_over_9.5", 2.10)]
+        with caplog.at_level("WARNING"):
+            ev, vig_used = _calculate_ev_without_vig(pred, 2.10, "corners_over_9.5", odds_list)
+        assert vig_used is False
+        assert ev == pytest.approx(calculate_ev(pred, 2.10))
+        assert _complementary_odd("corners_over_9.5", odds_list) is None
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("complementary_odd_not_found" in r.getMessage() for r in warnings)
+        assert any("match_id=10" in r.getMessage() for r in warnings)
+        assert vig_stats.fallback == 1
+
+    def test_mismatched_line_is_treated_as_no_pair(self, caplog):
+        # Definido: par exige a MESMA linha (over_9.5 + under_10.5 ≠ par).
+        # Limiares diferentes → sem complemento → fallback para odd bruta.
+        vig_stats.reset()
+        pred = self._pred(0.55)
+        odds_list = [
+            self._odds("corners_over_9.5", 2.10),
+            self._odds("corners_under_10.5", 1.75),
+        ]
+        with caplog.at_level("WARNING"):
+            ev, vig_used = _calculate_ev_without_vig(pred, 2.10, "corners_over_9.5", odds_list)
+        assert vig_used is False
+        assert ev == pytest.approx(calculate_ev(pred, 2.10))
+        assert _complementary_odd("corners_over_9.5", odds_list) is None
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("complementary_odd_not_found" in r.getMessage() for r in warnings)
+
+
+class TestVigFallbackStats:
+    """Contadores: % de oportunidades com vig removido vs. fallback."""
+
+    def _pred(self) -> Prediction:
+        return Prediction(
+            match_id=1,
+            market="corners_over_9.5",
+            probability=0.55,
+            fair_odd=1.82,
+            model_version="test",
+        )
+
+    def test_five_opportunities_three_pairs(self):
+        # 5 avaliações → 3 com par Over/Under, 2 sem → 60% de sucesso.
+        vig_stats.reset()
+        pair = [
+            Odds(match_id=1, market="corners_over_9.5", odd_value=1.90),
+            Odds(match_id=1, market="corners_under_9.5", odd_value=1.90),
+        ]
+        lone = [Odds(match_id=1, market="corners_over_9.5", odd_value=1.90)]
+        pred = self._pred()
+
+        for odds_list in [pair, pair, pair, lone, lone]:
+            _calculate_ev_without_vig(pred, 1.90, "corners_over_9.5", odds_list)
+
+        assert vig_stats.with_vig == 3
+        assert vig_stats.fallback == 2
+        assert vig_stats.total == 5
+        assert vig_stats.vig_percent == pytest.approx(60.0)
+        assert vig_stats.fallback_percent == pytest.approx(40.0)
+
+    def test_alert_when_fallback_above_threshold(self, caplog):
+        stats = VigStats()
+        stats.with_vig = 3
+        stats.fallback = 5  # 62.5% de fallback > 20%
+        with caplog.at_level("ERROR"):
+            message = _report_fallback_alert(stats)
+        assert message is not None
+        assert "ALERTA:" in message
+        assert "62.5%" in message
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any("vig_fallback_alert" in r.getMessage() for r in errors)
+
+    def test_no_alert_below_threshold(self):
+        stats = VigStats()
+        stats.with_vig = 5
+        stats.fallback = 1  # 16.7% < 20%
+        assert _report_fallback_alert(stats) is None
+
+    def test_no_alert_when_no_evaluations(self):
+        stats = VigStats()
+        assert _report_fallback_alert(stats) is None
