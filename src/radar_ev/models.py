@@ -117,6 +117,12 @@ class Opportunity(BaseModel):
         description="True se o EV usou odd justa (par Over/Under encontrado); "
                     "False se caiu em fallback (odd bruta); None se não registrado",
     )
+    vig_divergente: Optional[bool] = Field(
+        None,
+        description="True se caiu em fallback mas existe complemento com limiar "
+                    "divergente (ex: over_9.5 sem under_9.5, com under_10.5); "
+                    "candidato a interpolação futura",
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="Data e hora em que a oportunidade foi encontrada",

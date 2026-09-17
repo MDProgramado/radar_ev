@@ -43,7 +43,8 @@ class Database:
                     status TEXT DEFAULT 'PENDING',
                     result_won BOOLEAN,
                     profit REAL,
-                    vig_removed BOOLEAN
+                    vig_removed BOOLEAN,
+                    vig_divergente BOOLEAN
                 )
             """)
             # Migração para bancos existentes que ainda não têm a coluna
@@ -52,6 +53,10 @@ class Database:
             if "vig_removed" not in columns:
                 cursor.execute(
                     "ALTER TABLE opportunities ADD COLUMN vig_removed BOOLEAN"
+                )
+            if "vig_divergente" not in columns:
+                cursor.execute(
+                    "ALTER TABLE opportunities ADD COLUMN vig_divergente BOOLEAN"
                 )
             conn.commit()
 
@@ -65,13 +70,17 @@ class Database:
             vig_removed = getattr(opp, "vig_removed", None)
             if vig_removed is not None:
                 vig_removed = int(bool(vig_removed))
+            vig_divergente = getattr(opp, "vig_divergente", None)
+            if vig_divergente is not None:
+                vig_divergente = int(bool(vig_divergente))
             
             cursor.execute("""
                 INSERT INTO opportunities (
                     match_id, home_team, away_team, league, market, 
                     fair_odd, offered_odd, ev_percent, confidence, 
-                    recommended_stake, created_at, match_date, vig_removed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    recommended_stake, created_at, match_date, vig_removed,
+                    vig_divergente
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 opp.match.id,
                 opp.match.home_team,
@@ -86,6 +95,7 @@ class Database:
                 opp.created_at.isoformat(),
                 opp.match.datetime.isoformat(),
                 vig_removed,
+                vig_divergente,
             ))
             conn.commit()
 

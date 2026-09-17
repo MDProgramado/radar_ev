@@ -90,6 +90,43 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ---- Monitoramento de Vig (taxa de fallback de pares Over/Under) ----
+    # FALLBACK_WARNING_THRESHOLD: 20% é um chute inicial. Revisar após a
+    # primeira execução real em produção. Se a Betano publicar Under para
+    # <80% dos mercados estruturalmente, aumentar o threshold.
+    fallback_warning_threshold: float = Field(
+        20.0,
+        alias="FALLBACK_WARNING_THRESHOLD",
+        ge=0.0,
+        le=100.0,
+        description=(
+            "% mínimo de avaliações de EV que caíram em fallback (sem par "
+            "Over/Under) para disparar o alerta de coleta"
+        ),
+    )
+    fallback_alert_level: str = Field(
+        "ERROR",
+        alias="FALLBACK_ALERT_LEVEL",
+        description=(
+            "Nível do log de alerta de fallback: 'ERROR' ou 'INFO'. Em modo "
+            "mock o alerta é sempre INFO (dado sintético sem pares)"
+        ),
+    )
+
+    # ---- Resolução de Resultados (result_resolver) ----
+    # Percentual de RESOLVED com result_won IS NULL que dispara WARNING.
+    result_resolution_null_threshold: float = Field(
+        5.0,
+        alias="RESULT_RESOLUTION_NULL_THRESHOLD",
+        ge=0.0,
+        le=100.0,
+        description=(
+            "% máximo aceitável de resoluções indeterminadas (NULL) sobre o "
+            "total de RESOLVED antes de emitir WARNING (cancelamentos/"
+            "adiamentos/dados incompletos)"
+        ),
+    )
+
     # ---- Whitelist de Mercados (Range de Sanity) ----
     # Mercados fora destes limites são rejeitados antes de qualquer chamada de API.
     market_corners_min: float = Field(

@@ -173,6 +173,7 @@ def create_opportunity(
     ev_percent: float,
     reasoning: str = "EV positivo identificado pelo modelo Poisson",
     vig_removed: Optional[bool] = None,
+    vig_divergente: Optional[bool] = None,
 ) -> Opportunity:
     """Cria um objeto Opportunity a partir dos componentes do pipeline.
 
@@ -184,6 +185,8 @@ def create_opportunity(
         reasoning: Justificativa da oportunidade.
         vig_removed: True se o EV usou odd justa (par Over/Under); False se
                      usou odd bruta (fallback). Persistido para monitoramento.
+        vig_divergente: True se caiu em fallback mas existe complemento com
+                        limiar divergente (candidato a interpolação futura).
 
     Returns:
         Objeto Opportunity pronto para filtragem por regras e envio.
@@ -200,4 +203,5 @@ def create_opportunity(
         recommended_stake_percent=round(stake, 2),
         reasoning=reasoning,
         vig_removed=vig_removed,
+        vig_divergente=vig_divergente,
     )

@@ -38,16 +38,18 @@ def generate_csv_report(output_file: str = "relatorio_transparencia.csv"):
                 SELECT
                     COUNT(*) AS total,
                     COALESCE(SUM(CASE WHEN vig_removed = 1 THEN 1 ELSE 0 END), 0) AS with_vig,
-                    COALESCE(SUM(CASE WHEN vig_removed = 0 THEN 1 ELSE 0 END), 0) AS fallback
+                    COALESCE(SUM(CASE WHEN vig_removed = 0 THEN 1 ELSE 0 END), 0) AS fallback,
+                    COALESCE(SUM(CASE WHEN vig_divergente = 1 THEN 1 ELSE 0 END), 0) AS divergente
                 FROM opportunities
                 WHERE status = 'RESOLVED'
             """)
-            total, with_vig, fallback = cursor.fetchone()
+            total, with_vig, fallback, divergente = cursor.fetchone()
             if total:
                 fallback_pct = (fallback * 100.0) / total
                 with_vig_pct = (with_vig * 100.0) / total
+                divergente_pct = (divergente * 100.0) / total
             else:
-                fallback_pct = with_vig_pct = 0.0
+                fallback_pct = with_vig_pct = divergente_pct = 0.0
 
         if not rows:
             print("❌ Nenhum dado resolvido para exportar no momento. Rode o result_resolver.py primeiro.")
@@ -92,6 +94,8 @@ def generate_csv_report(output_file: str = "relatorio_transparencia.csv"):
             writer.writerow(["MONITORAMENTO DE VIG (par Over/Under)"])
             writer.writerow(["Apostas com vig removido (par encontrado)", f"{with_vig} ({with_vig_pct:.1f}%)"])
             writer.writerow(["Apostas com fallback (odd bruta)", f"{fallback} ({fallback_pct:.1f}%)"])
+            if divergente:
+                writer.writerow(["Fallback por limiar divergente", f"{divergente} ({divergente_pct:.1f}%)"])
             if total:
                 writer.writerow(["Taxa de fallback", f"{fallback_pct:.1f}%"])
             
@@ -100,7 +104,8 @@ def generate_csv_report(output_file: str = "relatorio_transparencia.csv"):
         if total:
             print(
                 f"🔎 Vig removido: {with_vig} ({with_vig_pct:.1f}%) | "
-                f"Fallback: {fallback} ({fallback_pct:.1f}%)"
+                f"Fallback: {fallback} ({fallback_pct:.1f}%) | "
+                f"Limiar divergente: {divergente} ({divergente_pct:.1f}%)"
             )
 
     except Exception as e:
