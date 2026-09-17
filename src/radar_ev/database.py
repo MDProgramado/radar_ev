@@ -42,9 +42,17 @@ class Database:
                     match_date TIMESTAMP,
                     status TEXT DEFAULT 'PENDING',
                     result_won BOOLEAN,
-                    profit REAL
+                    profit REAL,
+                    vig_removed BOOLEAN
                 )
             """)
+            # Migração para bancos existentes que ainda não têm a coluna
+            cursor.execute("PRAGMA table_info(opportunities)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "vig_removed" not in columns:
+                cursor.execute(
+                    "ALTER TABLE opportunities ADD COLUMN vig_removed BOOLEAN"
+                )
             conn.commit()
 
     def save_opportunity(self, opp: Opportunity):
@@ -54,13 +62,16 @@ class Database:
             
             # Pega o recommended_stake_percent de forma segura (fallback para 0.0)
             stake = getattr(opp, "recommended_stake_percent", 0.0)
+            vig_removed = getattr(opp, "vig_removed", None)
+            if vig_removed is not None:
+                vig_removed = int(bool(vig_removed))
             
             cursor.execute("""
                 INSERT INTO opportunities (
                     match_id, home_team, away_team, league, market, 
                     fair_odd, offered_odd, ev_percent, confidence, 
-                    recommended_stake, created_at, match_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    recommended_stake, created_at, match_date, vig_removed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 opp.match.id,
                 opp.match.home_team,
@@ -74,6 +85,7 @@ class Database:
                 stake,
                 opp.created_at.isoformat(),
                 opp.match.datetime.isoformat(),
+                vig_removed,
             ))
             conn.commit()
 

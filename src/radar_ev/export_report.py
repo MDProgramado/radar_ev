@@ -33,6 +33,22 @@ def generate_csv_report(output_file: str = "relatorio_transparencia.csv"):
             
             rows = cursor.fetchall()
 
+            # Contadores de remoção de vig (par Over/Under vs. fallback)
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN vig_removed = 1 THEN 1 ELSE 0 END), 0) AS with_vig,
+                    COALESCE(SUM(CASE WHEN vig_removed = 0 THEN 1 ELSE 0 END), 0) AS fallback
+                FROM opportunities
+                WHERE status = 'RESOLVED'
+            """)
+            total, with_vig, fallback = cursor.fetchone()
+            if total:
+                fallback_pct = (fallback * 100.0) / total
+                with_vig_pct = (with_vig * 100.0) / total
+            else:
+                fallback_pct = with_vig_pct = 0.0
+
         if not rows:
             print("❌ Nenhum dado resolvido para exportar no momento. Rode o result_resolver.py primeiro.")
             return
@@ -72,9 +88,20 @@ def generate_csv_report(output_file: str = "relatorio_transparencia.csv"):
             # Rodapé de resumo financeiro
             writer.writerow([])
             writer.writerow(["", "", "", "", "", "", "", "", "SALDO TOTAL:", f"{saldo_acumulado:+.2f}% da Banca"])
+            writer.writerow([])
+            writer.writerow(["MONITORAMENTO DE VIG (par Over/Under)"])
+            writer.writerow(["Apostas com vig removido (par encontrado)", f"{with_vig} ({with_vig_pct:.1f}%)"])
+            writer.writerow(["Apostas com fallback (odd bruta)", f"{fallback} ({fallback_pct:.1f}%)"])
+            if total:
+                writer.writerow(["Taxa de fallback", f"{fallback_pct:.1f}%"])
             
         print(f"✅ Relatório comercial gerado com sucesso: {output_file}")
         print(f"💰 Saldo Atual Comprovado: {saldo_acumulado:+.2f}%")
+        if total:
+            print(
+                f"🔎 Vig removido: {with_vig} ({with_vig_pct:.1f}%) | "
+                f"Fallback: {fallback} ({fallback_pct:.1f}%)"
+            )
 
     except Exception as e:
         logger.error("report_generation_failed", error=str(e))

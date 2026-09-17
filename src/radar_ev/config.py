@@ -73,6 +73,23 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ---- Gestão de Risco (Stake) ----
+    # Fração do Kelly completo usada na stake. 1/4 Kelly: drawdown esperado
+    # ~50% menor que o Kelly completo, sacrificando apenas ~25% do crescimento
+    # teórico — proteção contra superestimativa do modelo (model mispricing) e
+    # variância nos primeiros meses de operação.
+    kelly_fraction: float = Field(
+        0.25,
+        alias="KELLY_FRACTION",
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Fração do Kelly completo aplicada à stake. 1/4 Kelly reduz o "
+            "drawdown esperado em ~50% com perda de apenas ~25% do crescimento "
+            "teórico (gestão de risco conservadora)"
+        ),
+    )
+
     # ---- Whitelist de Mercados (Range de Sanity) ----
     # Mercados fora destes limites são rejeitados antes de qualquer chamada de API.
     market_corners_min: float = Field(

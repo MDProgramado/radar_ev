@@ -112,6 +112,11 @@ class Opportunity(BaseModel):
         0.0,
         description="Porcentagem sugerida da banca (Critério de Kelly Fracionário)",
     )
+    vig_removed: Optional[bool] = Field(
+        None,
+        description="True se o EV usou odd justa (par Over/Under encontrado); "
+                    "False se caiu em fallback (odd bruta); None se não registrado",
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="Data e hora em que a oportunidade foi encontrada",

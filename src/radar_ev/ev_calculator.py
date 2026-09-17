@@ -7,7 +7,7 @@ Funções puras para:
 - Criar objetos Opportunity a partir dos componentes do pipeline.
 """
 
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from radar_ev.config import settings
 from radar_ev.models import Match, Odds, Opportunity, Prediction
@@ -123,7 +123,11 @@ def calculate_ev_vig_removed(
     return calculate_ev(prediction, fair_offered_odd)
 
 
-def calculate_kelly(probability: float, offered_odd: float, fraction: float = 0.25) -> float:
+def calculate_kelly(
+    probability: float,
+    offered_odd: float,
+    fraction: Optional[float] = None,
+) -> float:
     """Calcula a porcentagem da banca a ser apostada usando o Critério de Kelly Fracionário.
 
     Fórmula: f* = (bp - q) / b
@@ -135,13 +139,17 @@ def calculate_kelly(probability: float, offered_odd: float, fraction: float = 0.
     Args:
         probability: Probabilidade de vitória (0.0 a 1.0).
         offered_odd: Odd decimal oferecida pela casa (ex: 2.10).
-        fraction: Fator de mitigação de risco (ex: 0.25 = Quarter Kelly).
+        fraction: Fator de mitigação de risco. Se None, usa `settings.kelly_fraction`
+                  (default 0.25 = Quarter Kelly).
 
     Returns:
         Porcentagem da banca recomendada para a aposta (máximo de 5% por segurança).
     """
     if offered_odd <= 1.0 or probability <= 0.0:
         return 0.0
+
+    if fraction is None:
+        fraction = settings.kelly_fraction
 
     b = offered_odd - 1.0
     p = probability
@@ -164,6 +172,7 @@ def create_opportunity(
     odds: Odds,
     ev_percent: float,
     reasoning: str = "EV positivo identificado pelo modelo Poisson",
+    vig_removed: Optional[bool] = None,
 ) -> Opportunity:
     """Cria um objeto Opportunity a partir dos componentes do pipeline.
 
@@ -173,6 +182,8 @@ def create_opportunity(
         odds: Odd oferecida pela casa.
         ev_percent: Valor esperado percentual calculado.
         reasoning: Justificativa da oportunidade.
+        vig_removed: True se o EV usou odd justa (par Over/Under); False se
+                     usou odd bruta (fallback). Persistido para monitoramento.
 
     Returns:
         Objeto Opportunity pronto para filtragem por regras e envio.
@@ -188,4 +199,5 @@ def create_opportunity(
         confidence=prediction.probability,
         recommended_stake_percent=round(stake, 2),
         reasoning=reasoning,
+        vig_removed=vig_removed,
     )
