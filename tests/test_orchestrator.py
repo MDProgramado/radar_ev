@@ -4,6 +4,7 @@ test_orchestrator.py — Testes para o pipeline orquestrador.
 
 import pytest
 from unittest.mock import AsyncMock, patch
+from radar_ev.collectors.football_api import FootballAPICollector
 from radar_ev.orchestrator import (
     _filter_matches,
     _extract_threshold,
@@ -77,6 +78,84 @@ async def test_mock_pipeline():
     from radar_ev.orchestrator import _run_mock_pipeline
     opps = await _run_mock_pipeline()
     assert isinstance(opps, list)
+
+
+class TestNormalizeMarketName:
+    """Normalizador canônico (casos reais da Betano)."""
+
+    norm = staticmethod(FootballAPICollector._normalize_market_name)
+
+    def test_goals_over_25(self):
+        assert self.norm("Goals Over/Under", "Over 2.5") == "goals_over_2.5"
+
+    def test_goals_under_25(self):
+        assert self.norm("Goals Over/Under", "Under 2.5") == "goals_under_2.5"
+
+    def test_goals_over_under_first_half_rejected(self):
+        assert self.norm("Goals Over/Under First Half", "Over 0.5") is None
+
+    def test_corners_over_95(self):
+        assert self.norm("Corners Over/Under", "Over 9.5") == "corners_over_9.5"
+
+    def test_cards_over_45(self):
+        assert self.norm("Cards Over/Under", "Over 4.5") == "cards_over_4.5"
+
+    def test_cards_under_45(self):
+        assert self.norm("Cards Over/Under", "Under 4.5") == "cards_under_4.5"
+
+    def test_total_home_rejected(self):
+        assert self.norm("Total - Home", "Under 2.5") is None
+
+    def test_total_away_rejected(self):
+        assert self.norm("Total - Away", "Under 1.5") is None
+
+    def test_home_team_rejected(self):
+        assert self.norm("Home Team Total Goals", "Over 1.5") is None
+
+    def test_away_team_rejected(self):
+        assert self.norm("Away Team Total Goals", "Under 1.5") is None
+
+    def test_match_winner_rejected(self):
+        assert self.norm("Match Winner", "Home") is None
+
+    def test_asian_handicap_rejected(self):
+        assert self.norm("Asian Handicap", "Home +0.25") is None
+
+    def test_odd_even_rejected(self):
+        assert self.norm("Odd/Even", "Even") is None
+
+    def test_double_chance_rejected(self):
+        assert self.norm("Double Chance", "Home/Draw") is None
+
+    def test_home_away_bet_rejected(self):
+        assert self.norm("Corners Home/Away", "Home") is None
+
+    def test_home_corners_over_under_rejected(self):
+        assert self.norm("Home Corners Over/Under", "Over 3.5") is None
+
+    def test_away_corners_over_under_rejected(self):
+        assert self.norm("Away Corners Over/Under", "Over 5.5") is None
+
+    def test_home_team_goals_over_under_rejected(self):
+        assert self.norm("Home Team Goals Over/Under", "Over 1.5") is None
+
+    def test_home_cards_over_under_rejected(self):
+        assert self.norm("Home Cards Over/Under", "Over 2.5") is None
+
+    def test_total_corners_over_95(self):
+        assert self.norm("Total Corners", "Over 9.5") == "corners_over_9.5"
+
+    def test_corners_over_under_spaces(self):
+        assert self.norm("Corners Over Under", "Over 9.5") == "corners_over_9.5"
+
+    def test_no_direction_rejected(self):
+        assert self.norm("Goals Over/Under", "Total 2.5") is None
+
+    def test_no_line_rejected(self):
+        assert self.norm("Goals Over/Under", "Over") is None
+
+    def test_shot_on_target_rejected(self):
+        assert self.norm("Shot On Target", "Over 4.5") is None
 
 
 class TestParseMarketWhitelist:

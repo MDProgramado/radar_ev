@@ -12,6 +12,7 @@ Endpoints utilizados:
 """
 
 from datetime import datetime
+import re
 from typing import List, Optional
 
 import structlog
@@ -149,8 +150,10 @@ class FootballAPICollector:
                                 odd_label = odd_detail.get("value", odd_detail.get("name", ""))
 
                                 if odd_value > 0:
-                                    # Nome do mercado: "tipo_valor" (ex: "Over/Under_Over 9.5")
+                                    # Nome do mercado: "tipo_over/under_linha" (ex: "goals_over_2.5")
                                     market_name = self._normalize_market_name(bet_name, str(odd_label))
+                                    if market_name is None:
+                                        continue
 
                                     odds_list.append(
                                         Odds(
@@ -281,25 +284,69 @@ class FootballAPICollector:
         await self.close()
 
     @staticmethod
-    def _normalize_market_name(bet_name: str, odd_label: str) -> str:
-        """Normaliza o nome do mercado para formato padronizado.
+    def _normalize_market_name(bet_name: str, odd_label: str) -> Optional[str]:
+        """Normaliza o nome do mercado para formato canônico.
 
-        Converte nomes como "Over/Under" + "Over 9.5" em "corners_over_9.5".
+        Converte nomes como "Goals Over/Under" + "Over 2.5" em "goals_over_2.5".
+
+        Regras:
+        - Categoria detectada a partir do bet_name (corner→corners, card→cards, goal→goals).
+          Sem categoria conhecida, retorna None.
+        - Variantes inválidas são rejeitadas explicitamente (1º/2º tempo,
+          times específicos, Home/Away sem ser over/under).
+        - Direção (over/under) vem do odd_label. Sem direção, retorna None.
+        - Linha extraída via regex \\d+(?:\\.\\d{1,2})? do odd_label.
+        - Sem linha, retorna None.
 
         Args:
-            bet_name: Nome do tipo de aposta (ex: "Corners Over/Under").
-            odd_label: Label da odd específica (ex: "Over 9.5").
+            bet_name: Nome do tipo de aposta (ex: "Goals Over/Under").
+            odd_label: Label da odd específica (ex: "Over 2.5").
 
         Returns:
-            Nome normalizado do mercado (ex: "corners_over_9.5").
+            Nome canônico do mercado (ex: "goals_over_2.5") ou None se não suportado.
         """
-        # Normaliza para lowercase e remove espaços extras
-        name = f"{bet_name}_{odd_label}".lower().strip()
+        bname = bet_name.lower().strip()
+        label = odd_label.lower().strip()
 
-        # Substitui espaços por underscore
-        name = name.replace(" ", "_")
+        # 1. Normaliza separadores: [_/\-.] viram espaço e múltiplos espaços colapsam
+        normalized_bname = re.sub(r"\s+", " ", re.sub(r"[_/\-.]", " ", bname)).strip()
 
-        # Remove caracteres especiais
-        name = name.replace("/", "_")
+        # 2. Mercados específicos de TIME (Home/Away) não são suportados —
+        #    o modelo só cobre a PARTIDA INTEIRA Over/Under
+        if re.search(r"\b(home|away)\b", normalized_bname):
+            return None
 
-        return name
+        # 3. Detecta categoria a partir do bet_name
+        if "corner" in bname:
+            category = "corners"
+        elif "card" in bname:
+            category = "cards"
+        elif "goal" in bname:
+            category = "goals"
+        else:
+            return None
+
+        # 4. Variantes inválidas — apenas a PARTIDA INTEIRA Over/Under é aceita
+        invalid_markers = [
+            "first half",
+            "1st half",
+            "second half",
+            "2nd half",
+        ]
+        if any(marker in normalized_bname for marker in invalid_markers):
+            return None
+
+        # 5+6. Direção e linha a partir do odd_label
+        if "over" in label:
+            direction = "over"
+        elif "under" in label:
+            direction = "under"
+        else:
+            return None
+
+        match = re.search(r"\d+(?:\.\d{1,2})?", label)
+        if not match:
+            return None
+        line = match.group(0)
+
+        return f"{category}_{direction}_{line}"
