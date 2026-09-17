@@ -17,9 +17,10 @@ Padrões aplicados:
 """
 
 import asyncio
+import re
 import sys
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import structlog
 
@@ -29,7 +30,11 @@ from radar_ev.ev_calculator import calculate_ev, create_opportunity
 from radar_ev.http_client import RateLimitError
 from radar_ev.logger import setup_logging
 from radar_ev.models import Match, Opportunity
-from radar_ev.predictor import make_cards_prediction, make_corners_prediction
+from radar_ev.predictor import (
+    make_cards_prediction,
+    make_corners_prediction,
+    make_goals_prediction,
+)
 from radar_ev.rules import apply_all_rules
 
 logger = structlog.get_logger(__name__)
@@ -110,6 +115,53 @@ def format_market_name(market: str) -> str:
 # =============================================================================
 RATE_LIMIT_DELAY = 0.6  # Segundos entre cada chamada (≈10 req/min)
 MAX_RATE_LIMIT_RETRIES = 3
+
+
+# =============================================================================
+# Whitelist de Mercados (estrita)
+# =============================================================================
+# Única forma aceita: <tipo>_<over|under>_<limiar numérico com até 2 casas>
+MARKET_PATTERN = re.compile(r"^(corners|cards|goals)_(over|under)_(\d+(?:\.\d{1,2})?)$")
+
+MARKET_THRESHOLD_RANGES = {
+    "corners": (settings.market_corners_min, settings.market_corners_max),
+    "cards": (settings.market_cards_min, settings.market_cards_max),
+    "goals": (settings.market_goals_min, settings.market_goals_max),
+}
+
+
+def _parse_market(market: str) -> Optional[Tuple[str, str, float]]:
+    """Valida um mercado contra a whitelist estrita e a faixa aceita.
+
+    O modelo Poisson calcula a probabilidade da PARTIDA INTEIRA para
+    corners/cards/goals Over/Under. Qualquer outro formato (asiáticos,
+    double chance, 1º tempo, jogador, etc.) é rejeitado aqui.
+
+    Returns:
+        Tupla (tipo, over_under, limiar) se aceito; None se rejeitado.
+    """
+    market_lower = market.lower()
+    match = MARKET_PATTERN.match(market_lower)
+    if not match:
+        logger.warning("market_rejected", market=market, reason="not_in_whitelist")
+        return None
+
+    market_type, side, threshold_str = match.groups()
+    threshold = float(threshold_str)
+    min_threshold, max_threshold = MARKET_THRESHOLD_RANGES[market_type]
+
+    if not (min_threshold <= threshold <= max_threshold):
+        logger.warning(
+            "market_rejected",
+            market=market,
+            reason="threshold_out_of_range",
+            threshold=threshold,
+            min_threshold=min_threshold,
+            max_threshold=max_threshold,
+        )
+        return None
+
+    return market_type, side, threshold
 
 
 # =============================================================================
@@ -347,20 +399,26 @@ async def _get_prediction_for_market(
     market: str,
     football_api: object,
 ) -> Optional[object]:
-    """Gera predição Poisson para o mercado, se suportado.
+    """Gera predição Poisson para o mercado, se suportado (whitelist estrita).
 
-    Detecta o tipo de mercado (escanteios, cartões) e despacha para
-    o predictor apropriado.
+    Fluxo:
+    1. Valida o nome do mercado contra `MARKET_PATTERN` e a faixa de sanity.
+       Se não casar OU estiver fora do range → None (sem chamar a API).
+    2. Verifica se há IDs para buscar estatísticas. Sem IDs → None + log.
+    3. Despacha para o predictor apropriado (corners/cards/goals).
 
     Args:
         match: Partida.
-        market: Nome do mercado (ex: "corners_over_under_over_9.5").
+        market: Nome do mercado (ex: "corners_over_9.5").
         football_api: Instância do collector.
 
     Returns:
         Prediction ou None se o mercado não for suportado.
     """
-    market_lower = market.lower()
+    parsed = _parse_market(market)
+    if parsed is None:
+        return None
+    market_type, side, threshold = parsed
 
     # Verifica se temos IDs necessários para buscar estatísticas
     has_ids = all([
@@ -371,21 +429,15 @@ async def _get_prediction_for_market(
     ])
 
     if not has_ids:
-        # Sem IDs para buscar estatísticas, não podemos analisar seriamente.
+        logger.warning(
+            "market_skipped",
+            market=market,
+            reason="missing_team_ids",
+            match_id=match.id,
+        )
         return None
 
-    # -------------------------------------------------------------
-    # FILTRO DE SEGURANÇA: REJEITAR MERCADOS SECUNDÁRIOS
-    # O modelo Poisson do Radar+EV calcula a probabilidade da PARTIDA INTEIRA.
-    # Portanto, ignoramos mercados de 1º tempo, times específicos, asiáticos, etc.
-    # -------------------------------------------------------------
-    termos_proibidos = ["1st", "2nd", "half", "home", "away", "team", "casa", "fora", "primeiro", "segundo", "asian", "asiatico"]
-    if any(termo in market_lower for termo in termos_proibidos):
-        return None
-
-    # Detecta tipo de mercado e limiar
-    if "corner" in market_lower:
-        threshold = _extract_threshold(market_lower, default=9.5)
+    if market_type == "corners":
         await asyncio.sleep(RATE_LIMIT_DELAY)  # Rate limit para stats
         return await make_corners_prediction(
             match_id=match.id,
@@ -397,8 +449,7 @@ async def _get_prediction_for_market(
             threshold=threshold,
         )
 
-    elif "card" in market_lower:
-        threshold = _extract_threshold(market_lower, default=4.5)
+    elif market_type == "cards":
         await asyncio.sleep(RATE_LIMIT_DELAY)
         return await make_cards_prediction(
             match_id=match.id,
@@ -410,12 +461,8 @@ async def _get_prediction_for_market(
             threshold=threshold,
         )
 
-    elif "goals" in market_lower and ("over" in market_lower or "under" in market_lower):
-        threshold = _extract_threshold(market_lower, default=2.5)
-        is_over = "over" in market_lower
+    else:  # goals
         await asyncio.sleep(RATE_LIMIT_DELAY)
-        # Import the new function dynamically or ensure it's imported at the top
-        from radar_ev.predictor import make_goals_prediction
         return await make_goals_prediction(
             match_id=match.id,
             home_team_id=match.home_team_id,
@@ -424,13 +471,8 @@ async def _get_prediction_for_market(
             season=match.season,
             football_api=football_api,
             threshold=threshold,
-            is_over=is_over,
+            is_over=(side == "over"),
         )
-
-    else:
-        # Mercado não suportado pelo Poisson (ex: gols, match_winner).
-        # Em vez de retornar dados falsos (mock), simplesmente ignoramos o mercado.
-        return None
 
 
 def _extract_threshold(market_name: str, default: float = 9.5) -> float:

@@ -63,6 +63,39 @@ class Settings(BaseSettings):
         description="Janela de horas antes do jogo para análise",
     )
 
+    # ---- Whitelist de Mercados (Range de Sanity) ----
+    # Mercados fora destes limites são rejeitados antes de qualquer chamada de API.
+    market_corners_min: float = Field(
+        2.5,
+        alias="MARKET_CORNERS_MIN",
+        description="Limiar mínimo aceito para escanteios",
+    )
+    market_corners_max: float = Field(
+        15.5,
+        alias="MARKET_CORNERS_MAX",
+        description="Limiar máximo aceito para escanteios",
+    )
+    market_cards_min: float = Field(
+        1.5,
+        alias="MARKET_CARDS_MIN",
+        description="Limiar mínimo aceito para cartões",
+    )
+    market_cards_max: float = Field(
+        8.5,
+        alias="MARKET_CARDS_MAX",
+        description="Limiar máximo aceito para cartões",
+    )
+    market_goals_min: float = Field(
+        0.5,
+        alias="MARKET_GOALS_MIN",
+        description="Limiar mínimo aceito para gols",
+    )
+    market_goals_max: float = Field(
+        5.5,
+        alias="MARKET_GOALS_MAX",
+        description="Limiar máximo aceito para gols",
+    )
+
     # ---- Regras de Negócio ----
     # Armazenado como string bruta para evitar erro de JSON parsing do pydantic-settings.
     # Use a propriedade `derby_teams_list` para obter a lista parseada.
