@@ -63,3 +63,5 @@ data/
 # ---- Scripts de debug one-off ----
 get_specific_matches.py
 test_api_debug.py
+debug_market_names.py
+probe_mainstream.py
