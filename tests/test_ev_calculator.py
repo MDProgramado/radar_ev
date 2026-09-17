@@ -3,9 +3,74 @@ test_ev_calculator.py — Testes para o cálculo de valor esperado.
 """
 
 import pytest
-from radar_ev.ev_calculator import calculate_ev, create_opportunity
+from radar_ev.ev_calculator import (
+    calculate_ev,
+    calculate_ev_vig_removed,
+    create_opportunity,
+    remove_vig,
+)
 from radar_ev.models import Match, Odds, Prediction
 from datetime import datetime, timedelta, timezone
+
+
+class TestRemoveVig:
+    """Remoção do overround (margem da casa) — método proporcional."""
+
+    def test_symmetric_pair_sums_to_one(self):
+        # 1.90 / 1.90 → margem de ~5.26% → 50%/50%
+        probs = remove_vig([1.90, 1.90])
+        assert abs(sum(probs) - 1.0) < 1e-9
+        assert abs(probs[0] - 0.50) < 1e-9
+        assert abs(probs[1] - 0.50) < 1e-9
+
+    def test_asymmetric_pair_sums_to_one(self):
+        # 2.10 / 1.75 → p_justas devem somar exatamente 1.0
+        probs = remove_vig([2.10, 1.75])
+        assert abs(sum(probs) - 1.0) < 1e-9
+        assert probs[0] < probs[1]  # odd maior (2.10) → p menor
+
+    def test_favorites_has_higher_fair_prob(self):
+        # 1.50 (favorito) / 2.50 (azarão) → p_justa_over > p_justa_under
+        probs = remove_vig([1.50, 2.50])
+        assert probs[0] > probs[1]
+
+    def test_fair_odd_larger_than_raw_odd(self):
+        # A remoção de vig só AUMENTA a odd (a margem encolhe o preço)
+        probs = remove_vig([1.90, 2.10])
+        assert 1.0 / probs[0] > 1.90
+        assert 1.0 / probs[1] > 2.10
+
+    def test_unsupported_method_raises(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            remove_vig([1.90, 1.90], method="shin")
+
+
+class TestEvVigRemoved:
+    """EV com odd justa vs. EV com odd bruta."""
+
+    def _pred(self, prob: float = 0.55) -> Prediction:
+        return Prediction(
+            match_id=1, market="corners_over_9.5",
+            probability=prob, fair_odd=1.0 / prob, model_version="poisson_v1",
+        )
+
+    def test_ev_without_vig_is_not_below_raw_ev(self):
+        # p=0.55, Over 9.5 = 1.90, Under 9.5 = 1.90
+        # EV_bruto = (0.55*1.90 − 1)*100 = 4.50%
+        # EV_justo = (0.55*2.00 − 1)*100 = 10.00%  (vig removido)
+        pred = self._pred(0.55)
+        ev_raw = calculate_ev(pred, 1.90)
+        ev_fair = calculate_ev_vig_removed(pred, 1.90, 1.90)
+        assert abs(ev_raw - 4.50) < 0.01
+        assert abs(ev_fair - 10.00) < 0.01
+        assert ev_fair > ev_raw  # soberestimado não: subestimado sem remoção
+
+    def test_three_outcomes_sums_to_one(self):
+        # Mercado de 3 resultados (genérico, ex: 1X2) — soma = 1.0
+        probs = remove_vig([2.10, 3.40, 3.60])
+        assert abs(sum(probs) - 1.0) < 1e-9
 
 
 class TestCalculateEV:

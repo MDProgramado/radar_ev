@@ -63,6 +63,16 @@ class Settings(BaseSettings):
         description="Janela de horas antes do jogo para análise",
     )
 
+    # ---- Cálculo de EV ----
+    vig_removal_method: str = Field(
+        "proportional",
+        alias="VIG_REMOVAL_METHOD",
+        description=(
+            "Método de remoção do overround (vig) da casa antes de comparar "
+            "com a probabilidade do modelo (proportional)"
+        ),
+    )
+
     # ---- Whitelist de Mercados (Range de Sanity) ----
     # Mercados fora destes limites são rejeitados antes de qualquer chamada de API.
     market_corners_min: float = Field(

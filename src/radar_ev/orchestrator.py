@@ -26,7 +26,11 @@ import structlog
 
 from radar_ev.alert.telegram import TelegramSender
 from radar_ev.config import settings
-from radar_ev.ev_calculator import calculate_ev, create_opportunity
+from radar_ev.ev_calculator import (
+    calculate_ev,
+    calculate_ev_vig_removed,
+    create_opportunity,
+)
 from radar_ev.http_client import RateLimitError
 from radar_ev.logger import setup_logging
 from radar_ev.models import Match, Opportunity
@@ -120,14 +124,58 @@ MAX_RATE_LIMIT_RETRIES = 3
 # =============================================================================
 # Whitelist de Mercados (estrita)
 # =============================================================================
-# Única forma aceita: <tipo>_<over|under>_<limiar numérico com até 2 casas>
-MARKET_PATTERN = re.compile(r"^(corners|cards|goals)_(over|under)_(\d+(?:\.\d{1,2})?)$")
+# Única forma aceita: <tipo>_<over|under>_<linha decimal> (gerada pelo normalizador).
+MARKET_PATTERN = re.compile(r"^(corners|cards|goals)_(over|under)_(\d+\.\d{1,2})$")
 
 MARKET_THRESHOLD_RANGES = {
     "corners": (settings.market_corners_min, settings.market_corners_max),
     "cards": (settings.market_cards_min, settings.market_cards_max),
     "goals": (settings.market_goals_min, settings.market_goals_max),
 }
+
+
+def _complementary_odd(market: str, odds_list: list) -> Optional[float]:
+    """Retorna a odd bruta do resultado complementar (Under↔Over, mesma linha).
+
+    Ex: "corners_over_9.5" → procura "corners_under_9.5" na lista de odds.
+    Usada para remover o vig (margem da casa) antes de calcular o EV.
+
+    Returns:
+        Odd do resultado complementar, ou None se não encontrada /
+        se o mercado não estiver no formato Over/Under da whitelist.
+    """
+    match = MARKET_PATTERN.match(market)
+    if not match:
+        return None
+    market_type, direction, line = match.groups()
+    opposite = "under" if direction == "over" else "over"
+    complement_market = f"{market_type}_{opposite}_{line}"
+    for odds in odds_list:
+        if odds.market == complement_market:
+            return odds.odd_value
+    return None
+
+
+def _calculate_ev_without_vig(
+    prediction: object,
+    offered_odd: float,
+    market: str,
+    odds_list: list,
+) -> float:
+    """Calcula o EV usando a odd justa (sem vig) quando o par Over/Under existe.
+
+    Se o mercado complementar não estiver na lista (ex: mock), cai para o EV
+    com a odd bruta e registra em log — sem quebrar o pipeline.
+    """
+    complementary = _complementary_odd(market, odds_list)
+    if complementary is not None:
+        return calculate_ev_vig_removed(prediction, offered_odd, complementary)
+    logger.warning(
+        "complementary_odd_not_found",
+        market=market,
+        fallback="raw_odd",
+    )
+    return calculate_ev(prediction, offered_odd)
 
 
 def _parse_market(market: str) -> Optional[Tuple[str, str, float]]:
@@ -185,7 +233,7 @@ async def _run_mock_pipeline() -> List[Opportunity]:
         odds_list = get_mock_odds(match.id)
         for odds in odds_list:
             pred = get_mock_prediction(match.id, odds.market)
-            ev = calculate_ev(pred, odds.odd_value)
+            ev = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
 
             market_amigavel = format_market_name(odds.market)
             odds.market = market_amigavel
@@ -349,7 +397,7 @@ async def _process_match_odds(
             continue
 
         # Calcula EV
-        ev = calculate_ev(pred, odds.odd_value)
+        ev = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
 
         market_amigavel = format_market_name(odds.market)
         odds.market = market_amigavel
