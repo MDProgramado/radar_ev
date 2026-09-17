@@ -19,6 +19,7 @@ Padrões aplicados:
 import argparse
 import asyncio
 import re
+import sys
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Tuple
 
@@ -33,7 +34,11 @@ from radar_ev.ev_calculator import (
     create_opportunity,
 )
 from radar_ev.vig_stats import vig_stats
-from radar_ev.http_client import RateLimitError
+from radar_ev.http_client import (
+    RateLimitError,
+    get_api_request_count,
+    reset_api_request_count,
+)
 from radar_ev.logger import setup_logging
 from radar_ev.models import Match, Opportunity
 from radar_ev.predictor import (
@@ -48,6 +53,10 @@ logger = structlog.get_logger(__name__)
 # Flag em memória (não persistida): evita repetir o INFO de "resolução
 # desabilitada" a cada ciclo do daemon em modo mock (Risco 5).
 _logged_mock_resolution_disabled = False
+
+# Flag em memória: True se o pipeline quebrou nesta execução (para o exit code
+# do processo ir para 1 em vez de 0 — erros reais não podem parecer "verdes").
+_pipeline_crashed = False
 
 # =============================================================================
 # Ligas de interesse — a Betano normalmente cobre estas ligas
@@ -772,6 +781,9 @@ async def run_pipeline(
     # Zera contadores de vig desta execução
     vig_stats.reset()
 
+    # Zera o contador de requisições à API desta execução
+    reset_api_request_count()
+
     print("=" * 60)
     print("🎯 RADAR +EV — Sistema de Recomendação Pré-Jogo")
     print(f"📅 Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -830,10 +842,14 @@ async def run_pipeline(
             "pipeline_finished",
             opportunities_count=len(opportunities),
         )
+        logger.info("api_requests_used", count=get_api_request_count())
         return opportunities
 
     except Exception as exc:
+        global _pipeline_crashed
+        _pipeline_crashed = True
         logger.exception("pipeline_crashed", error=str(exc))
+        logger.info("api_requests_used", count=get_api_request_count())
         print(f"\n💥 ERRO CRÍTICO: {exc}")
         return []
 
@@ -886,12 +902,15 @@ async def _run_result_resolution() -> dict:
     """
     from radar_ev.result_resolver import ResultResolver
 
+    reset_api_request_count()
+
     resolver = ResultResolver()
     pending_rows = resolver.get_pending_opportunities()
     pending = len(pending_rows)
     logger.info("result_resolution_started", pending=pending)
     print(f"🔍 Resultados: {pending} oportunidade(s) PENDING encontrada(s).")
     if pending == 0:
+        logger.info("api_requests_used", count=get_api_request_count())
         return {"pending": 0, "greens": 0, "reds": 0, "nulls": 0, "still_pending": 0}
 
     await resolver.resolve_all()
@@ -925,6 +944,7 @@ async def _run_result_resolution() -> dict:
         f"✅ Resolvidas: {resolved} (GREEN={counts['greens']} RED={counts['reds']} "
         f"NULL={counts['nulls']})."
     )
+    logger.info("api_requests_used", count=get_api_request_count())
     return {"pending": pending, "resolved": resolved, **counts}
 
 
@@ -1042,11 +1062,24 @@ async def _execute_cli(args) -> None:
         await run_pipeline(use_mock=use_mock, league_filter=args.league)
 
 
-def main(argv: Optional[list] = None) -> None:
-    """Entry point para execução via CLI ou Poetry script."""
+def main(argv: Optional[list] = None) -> int:
+    """Entry point para execução via CLI ou Poetry script.
+
+    Returns:
+        Código de saída: 0 em caso de sucesso, 1 se o pipeline quebrou
+        (``pipeline_crashed``) ou se uma exceção não tratada propagou.
+    """
+    global _pipeline_crashed
+    _pipeline_crashed = False
     args = build_arg_parser().parse_args(argv)
-    asyncio.run(_execute_cli(args))
+    try:
+        asyncio.run(_execute_cli(args))
+    except Exception as exc:
+        logger.exception("cli_crashed", error=str(exc))
+        print(f"\n💥 ERRO CRÍTICO: {exc}")
+        return 1
+    return 1 if _pipeline_crashed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -841,3 +841,31 @@ class TestLeagueFilterDiagnostics:
         assert [m.league for m in filtered] == ["La Liga"]
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert not any("league_filter_no_matches" in r.getMessage() for r in warnings)
+
+
+class TestMainExitCodes:
+    """Exit code do processo: 0 sucesso, 1 falha (crash ou exceção)."""
+
+    def test_main_returns_1_when_pipeline_crashes(self, monkeypatch):
+        from radar_ev.http_client import RateLimitError
+        from radar_ev.orchestrator import main
+
+        async def boom(*args, **kwargs):
+            raise RateLimitError("You have reached the request limit for the day")
+
+        monkeypatch.setattr("radar_ev.orchestrator._run_real_pipeline", boom)
+        assert main([]) == 1
+
+    def test_main_returns_1_when_resolution_fails(self, monkeypatch):
+        from radar_ev.orchestrator import main
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("falha ao enviar relatório Telegram")
+
+        monkeypatch.setattr("radar_ev.orchestrator._run_result_resolution", boom)
+        assert main(["--resolve"]) == 1
+
+    def test_main_returns_0_on_successful_pipeline(self):
+        from radar_ev.orchestrator import main
+
+        assert main(["--mock"]) == 0

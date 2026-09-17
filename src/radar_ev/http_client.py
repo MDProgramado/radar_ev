@@ -21,6 +21,19 @@ from tenacity import (
 
 logger = structlog.get_logger(__name__)
 
+_API_REQUEST_COUNT = 0
+
+
+def get_api_request_count() -> int:
+    """Número de requisições HTTP reais feitas desde o último reset."""
+    return _API_REQUEST_COUNT
+
+
+def reset_api_request_count() -> None:
+    """Zera o contador (chamar no início de cada execução do pipeline)."""
+    global _API_REQUEST_COUNT
+    _API_REQUEST_COUNT = 0
+
 
 class HTTPClientError(Exception):
     """Erro genérico do cliente HTTP."""
@@ -93,6 +106,10 @@ class HTTPClient:
         log.info("http_request_start")
 
         try:
+            # Contabiliza a requisição real enviada à API (1 = 1 request do
+            # plano; retries de rede contam cada tentativa real).
+            global _API_REQUEST_COUNT
+            _API_REQUEST_COUNT += 1
             response = await self.client.get(endpoint, params=params)
 
             # Rate limit — não retenta, levanta exceção específica
