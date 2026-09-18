@@ -50,6 +50,19 @@ class RateLimitError(HTTPClientError):
         super().__init__(message, status_code=429)
 
 
+class ApiQuotaExhaustedError(HTTPClientError):
+    """Cota diária da API-Football esgotada.
+
+    A API-Football retorna HTTP 200 com ``results: 0`` e campo ``errors``
+    preenchido quando o limite diário de requisições é atingido. Esse erro é
+    DISTINTO de rate limit (429): não adianta retentar no mesmo dia, o
+    orquestrador deve encerrar o processo com código de saída próprio (2).
+    """
+
+    def __init__(self, message: str = "Cota diária da API-Football esgotada") -> None:
+        super().__init__(message, status_code=200)
+
+
 class HTTPClient:
     """Cliente HTTP assíncrono com retry e logging.
 
@@ -98,7 +111,9 @@ class HTTPClient:
             Dicionário com o JSON da resposta.
 
         Raises:
-            RateLimitError: Se a API retornar 429.
+            RateLimitError: Se a API retornar 429 ou soft rate limit.
+            ApiQuotaExhaustedError: Se a cota diária estiver esgotada
+                (200 com ``errors`` de "limit of request by day").
             HTTPClientError: Para outros erros HTTP (4xx, 5xx).
             httpx.RequestError: Para erros de rede (retentados automaticamente).
         """
@@ -123,11 +138,23 @@ class HTTPClient:
             
             data = response.json()
             
-            # API-Football retorna 200 OK mas com erro de limite no JSON (Soft Rate Limit)
+            # API-Football retorna 200 OK mas com erro de limite no JSON
+            # (soft rate limit) ou cota diária esgotada (results: 0 + errors).
             errors = data.get("errors", {})
-            if isinstance(errors, dict) and ("requests" in errors or "rateLimit" in errors):
-                log.warning("rate_limit_hit", errors=errors)
-                raise RateLimitError(f"Rate limit da API atingido: {errors}")
+            if isinstance(errors, dict) and errors:
+                msg = " ".join(str(v) for v in errors.values()).lower()
+                if "limit of request by day" in msg or "quota" in msg:
+                    log.error(
+                        "api_football_quota_exhausted",
+                        errors=errors,
+                        results=data.get("results"),
+                    )
+                    raise ApiQuotaExhaustedError(
+                        f"Cota diária da API-Football esgotada: {errors}"
+                    )
+                if "requests" in errors or "rateLimit" in errors:
+                    log.warning("rate_limit_hit", errors=errors)
+                    raise RateLimitError(f"Rate limit da API atingido: {errors}")
 
             log.info(
                 "http_request_success",
@@ -153,6 +180,9 @@ class HTTPClient:
             ) from exc
 
         except RateLimitError:
+            raise
+
+        except ApiQuotaExhaustedError:
             raise
 
         except Exception:

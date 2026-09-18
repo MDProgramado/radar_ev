@@ -18,10 +18,35 @@ from typing import List, Optional
 import structlog
 
 from radar_ev.config import settings
-from radar_ev.http_client import HTTPClient, RateLimitError
+from radar_ev.http_client import (
+    ApiQuotaExhaustedError,
+    HTTPClient,
+    RateLimitError,
+)
 from radar_ev.models import Match, Odds
 
 logger = structlog.get_logger(__name__)
+
+
+def _check_quota_errors(data: dict, endpoint: str) -> None:
+    """Levanta ApiQuotaExhaustedError se a resposta tiver ``errors`` preenchido.
+
+    A API-Football retorna HTTP 200 com ``results: 0`` e campo ``errors``
+    quando a cota diária estoura (ex: 442 partidas viram 0 em silêncio).
+    Sem essa checagem o pipeline trataria como sucesso e produziria 0
+    oportunidades sem nenhum sinal de erro.
+    """
+    errors = data.get("errors")
+    if errors:
+        logger.error(
+            "api_football_quota_exhausted",
+            endpoint=endpoint,
+            errors=errors,
+            result_count=data.get("results"),
+        )
+        raise ApiQuotaExhaustedError(
+            f"Cota diária da API-Football esgotada ({endpoint}): {errors}"
+        )
 
 
 class FootballAPICollector:
@@ -80,6 +105,12 @@ class FootballAPICollector:
             data = await self.client.get(endpoint, params=params)
             if data and data.get("response"):
                 await cache.set(cache_key, data, ttl_hours=4)
+
+        # Cota diária esgotada: API-Football responde 200 com results:0 e
+        # errors preenchido. NÃO é sucesso silencioso — propaga para o
+        # orquestrador encerrar com código próprio (exit 2).
+        _check_quota_errors(data, endpoint)
+
         matches: List[Match] = []
 
         for fixture in data.get("response", []):
@@ -134,6 +165,7 @@ class FootballAPICollector:
 
         try:
             data = await self.client.get(endpoint, params=params)
+            _check_quota_errors(data, endpoint)
             odds_list: List[Odds] = []
 
             for fixture_data in data.get("response", []):
@@ -181,6 +213,9 @@ class FootballAPICollector:
         except RateLimitError:
             logger.warning("odds_rate_limited", fixture_id=fixture_id)
             raise  # Propaga para o orquestrador controlar
+
+        except ApiQuotaExhaustedError:
+            raise  # Cota diária esgotada — propaga → exit 2 no orquestrador
 
         except Exception as exc:
             logger.error(
@@ -244,6 +279,7 @@ class FootballAPICollector:
 
             # 3) Sem cache: faz a requisição real à API
             data = await self.client.get(endpoint, params=params)
+            _check_quota_errors(data, endpoint)
 
             # Salva em memória SEMPRE; em disco só se houver resposta útil
             self._stats_cache[memory_key] = data
@@ -257,6 +293,9 @@ class FootballAPICollector:
                 season=season,
             )
             return data
+        except ApiQuotaExhaustedError:
+            raise  # Cota diária esgotada — propaga → exit 2 no orquestrador
+
         except Exception as exc:
             logger.error(
                 "team_statistics_failed",
@@ -286,11 +325,14 @@ class FootballAPICollector:
 
         try:
             data = await self.client.get(endpoint, params=params)
+            _check_quota_errors(data, endpoint)
             response = data.get("response", [])
             if response:
                 logger.info("lineups_fetched", fixture_id=fixture_id)
                 return data
             return None
+        except ApiQuotaExhaustedError:
+            raise  # Cota diária esgotada — propaga → exit 2 no orquestrador
         except Exception as exc:
             logger.warning("lineups_fetch_failed", fixture_id=fixture_id, error=str(exc))
             return None

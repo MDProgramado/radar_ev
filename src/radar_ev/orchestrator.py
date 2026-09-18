@@ -35,6 +35,7 @@ from radar_ev.ev_calculator import (
 )
 from radar_ev.vig_stats import vig_stats
 from radar_ev.http_client import (
+    ApiQuotaExhaustedError,
     RateLimitError,
     get_api_request_count,
     reset_api_request_count,
@@ -464,6 +465,13 @@ async def _run_real_pipeline(league_filter: Optional[str] = None) -> List[Opport
                 opportunities.extend(match_opps)
                 print()
 
+            except ApiQuotaExhaustedError:
+                logger.error(
+                    "api_football_quota_exhausted",
+                    message="Cota diária esgotada — encerrando pipeline (exit 2).",
+                )
+                raise  # Sem chance de resolver hoje; não continua processando
+
             except RateLimitError:
                 rate_limit_hits += 1
                 logger.warning("rate_limit_in_pipeline", hits=rate_limit_hits)
@@ -869,6 +877,11 @@ async def run_pipeline(
         logger.info("api_requests_used", count=get_api_request_count())
         return opportunities
 
+    except ApiQuotaExhaustedError:
+        # Cota diária esgotada: NÃO é um crash do pipeline (não conta como
+        # _pipeline_crashed). Propaga para main() retornar exit code 2.
+        raise
+
     except Exception as exc:
         global _pipeline_crashed
         _pipeline_crashed = True
@@ -1035,6 +1048,9 @@ async def _daemon_loop(
         except KeyboardInterrupt:
             print("🛑 Daemon interrompido pelo usuário.")
             break
+        except ApiQuotaExhaustedError:
+            print("🛑 Cota diária esgotada — encerrando daemon (exit 2).")
+            raise  # Propaga para main() retornar 2; não adianta esperar 5 min
         except Exception as e:
             print(f"💥 Erro no daemon: {e}")
             print(f"⏳ Tentando novamente em 5 minutos...")
@@ -1091,13 +1107,23 @@ def main(argv: Optional[list] = None) -> int:
 
     Returns:
         Código de saída: 0 em caso de sucesso, 1 se o pipeline quebrou
-        (``pipeline_crashed``) ou se uma exceção não tratada propagou.
+        (``pipeline_crashed``) ou se uma exceção não tratada propagou,
+        2 se a cota diária da API-Football estiver esgotada (distinto de
+        crash para monitoramento separado).
     """
     global _pipeline_crashed
     _pipeline_crashed = False
     args = build_arg_parser().parse_args(argv)
     try:
         asyncio.run(_execute_cli(args))
+    except ApiQuotaExhaustedError as exc:
+        logger.error(
+            "api_football_quota_exhausted",
+            message="Cota diária da API-Football esgotada. Encerrando (exit 2).",
+            error=str(exc),
+        )
+        print(f"\n🛑 COTA DIÁRIA ESGOTADA (exit 2): {exc}")
+        return 2
     except Exception as exc:
         logger.exception("cli_crashed", error=str(exc))
         print(f"\n💥 ERRO CRÍTICO: {exc}")

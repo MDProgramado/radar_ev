@@ -6,6 +6,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch, MagicMock
 from radar_ev.collectors.football_api import FootballAPICollector
+from radar_ev.http_client import ApiQuotaExhaustedError
 from radar_ev.models import Match
 
 
@@ -148,3 +149,62 @@ async def test_get_team_statistics_cached_even_with_empty_response():
         assert first == empty_response
         assert second == empty_response
         assert collector.client.get.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_today_matches_raises_on_quota_exhausted():
+    """API-Football responde 200 com errors preenchido (cota diária estourada)
+    → get_today_matches deve levantar ApiQuotaExhaustedError em vez de
+    retornar sucesso silencioso com 0 partidas."""
+    mock_response = {
+        "get": "/fixtures",
+        "errors": {
+            "requests": "Your account has reached the limit of request by day. Try again tomorrow."
+        },
+        "results": 0,
+    }
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=mock_response)
+
+        with patch("radar_ev.cache.cache") as mock_cache:
+            mock_cache.get = AsyncMock(return_value=None)
+            mock_cache.set = AsyncMock()
+
+            with pytest.raises(ApiQuotaExhaustedError):
+                await collector.get_today_matches(datetime(2025, 4, 2))
+
+
+@pytest.mark.asyncio
+async def test_get_today_matches_proceeds_with_empty_errors_field():
+    """Resposta com ``errors`` vazio ({}) → nada a bloquear;
+    o pipeline prossegue normalmente e parseia os matches."""
+    mock_response = {
+        "get": "/fixtures",
+        "errors": {},
+        "results": 1,
+        "response": [{
+            "fixture": {"id": 999, "date": "2025-04-02T20:00:00+00:00",
+                        "referee": None},
+            "teams": {"home": {"name": "Santos", "id": 134},
+                      "away": {"name": "Palmeiras", "id": 135}},
+            "league": {"name": "Brasileirão", "id": 71, "season": 2025}
+        }]
+    }
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=mock_response)
+
+        with patch("radar_ev.cache.cache") as mock_cache:
+            mock_cache.get = AsyncMock(return_value=None)
+            mock_cache.set = AsyncMock()
+
+            matches = await collector.get_today_matches(datetime(2025, 4, 2))
+
+        assert len(matches) == 1
+        assert matches[0].home_team == "Santos"
+        assert matches[0].away_team == "Palmeiras"

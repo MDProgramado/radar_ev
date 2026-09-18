@@ -959,6 +959,19 @@ class TestMainExitCodes:
         monkeypatch.setattr("radar_ev.orchestrator._run_real_pipeline", boom)
         assert main([]) == 1
 
+    def test_main_returns_2_when_quota_exhausted(self, monkeypatch):
+        from radar_ev.http_client import ApiQuotaExhaustedError
+        from radar_ev.orchestrator import main
+
+        async def boom(*args, **kwargs):
+            raise ApiQuotaExhaustedError(
+                "Cota diária da API-Football esgotada: "
+                "{'requests': 'limit of request by day'}"
+            )
+
+        monkeypatch.setattr("radar_ev.orchestrator._run_real_pipeline", boom)
+        assert main([]) == 2
+
     def test_main_returns_1_when_resolution_fails(self, monkeypatch):
         from radar_ev.orchestrator import main
 
