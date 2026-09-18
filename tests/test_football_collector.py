@@ -93,3 +93,58 @@ async def test_normalize_market_name():
     assert "corners" in name
     assert "9.5" in name
     assert " " not in name
+
+
+@pytest.mark.asyncio
+async def test_get_team_statistics_cached_in_memory():
+    """2 chamadas para o mesmo time/liga/season → apenas 1 requisição HTTP."""
+    mock_response = {
+        "response": {
+            "team": {"id": 10, "name": "Time A"},
+            "league": {"id": 71},
+            "goals": {
+                "for": {"average": {"total": "1.8"}},
+                "against": {"average": {"total": "1.2"}},
+            },
+        }
+    }
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector._stats_cache = {}
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=mock_response)
+
+        with patch("radar_ev.cache.cache") as mock_cache:
+            mock_cache.get = AsyncMock(return_value=None)
+            mock_cache.set = AsyncMock()
+
+            first = await collector.get_team_statistics(10, 71, 2026)
+            second = await collector.get_team_statistics(10, 71, 2026)
+
+        assert first == mock_response
+        assert second == mock_response
+        assert collector.client.get.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_team_statistics_cached_even_with_empty_response():
+    """Resposta vazia (sem key 'response') também é cacheada por execução."""
+    empty_response = {"get": "/teams/statistics", "response": []}
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector._stats_cache = {}
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=empty_response)
+
+        with patch("radar_ev.cache.cache") as mock_cache:
+            mock_cache.get = AsyncMock(return_value=None)
+            mock_cache.set = AsyncMock()
+
+            first = await collector.get_team_statistics(99, 71, 2026)
+            second = await collector.get_team_statistics(99, 71, 2026)
+
+        assert first == empty_response
+        assert second == empty_response
+        assert collector.client.get.await_count == 1

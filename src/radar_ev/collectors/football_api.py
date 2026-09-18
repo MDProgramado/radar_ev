@@ -51,6 +51,10 @@ class FootballAPICollector:
             headers=headers,
             timeout=30.0,
         )
+        # Cache em memória por execução (não persiste entre execuções):
+        # evita chamadas repetidas de /teams/statistics para o mesmo
+        # (team_id, league_id, season).
+        self._stats_cache: dict[tuple[int, int, int], dict] = {}
 
     async def get_today_matches(self, date: datetime) -> List[Match]:
         """Busca todas as partidas de uma data específica.
@@ -211,8 +215,22 @@ class FootballAPICollector:
         try:
             from radar_ev.cache import cache
             cache_key = f"stats_{team_id}_{league_id}_{season}"
-            
-            # Tenta pegar do cache local
+            memory_key = (team_id, league_id, season)
+
+            # 1) Cache em memória (desta execução): evita chamadas repetidas
+            #    de /teams/statistics para o mesmo time/liga/temporada.
+            #    Guarda TUDO o que retornou (mesmo respostas vazias/falhas)
+            #    para não re-bater no endpoint várias vezes no mesmo run.
+            if memory_key in self._stats_cache:
+                logger.info(
+                    "team_statistics_memory_cache_hit",
+                    team_id=team_id,
+                    league_id=league_id,
+                    season=season,
+                )
+                return self._stats_cache[memory_key]
+
+            # 2) Cache em disco (SQLite local) — persiste entre execuções
             cached_data = await cache.get(cache_key)
             if cached_data:
                 logger.info(
@@ -221,15 +239,17 @@ class FootballAPICollector:
                     league_id=league_id,
                     season=season,
                 )
+                self._stats_cache[memory_key] = cached_data
                 return cached_data
 
-            # Se não estiver no cache, faz a requisição
+            # 3) Sem cache: faz a requisição real à API
             data = await self.client.get(endpoint, params=params)
-            
-            # Salva no cache por 72 horas
+
+            # Salva em memória SEMPRE; em disco só se houver resposta útil
+            self._stats_cache[memory_key] = data
             if data and data.get("response"):
                 await cache.set(cache_key, data, ttl_hours=72)
-                
+
             logger.info(
                 "team_statistics_fetched",
                 team_id=team_id,
@@ -243,6 +263,8 @@ class FootballAPICollector:
                 team_id=team_id,
                 error=str(exc),
             )
+            # Evita repetir a chamada que falhou (ex: rate limit) no mesmo run
+            self._stats_cache[memory_key] = {}
             return {}
 
     async def get_lineups(self, fixture_id: int) -> Optional[dict]:
