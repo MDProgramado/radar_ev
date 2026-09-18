@@ -972,6 +972,29 @@ class TestMainExitCodes:
         monkeypatch.setattr("radar_ev.orchestrator._run_real_pipeline", boom)
         assert main([]) == 2
 
+    def test_main_returns_3_when_plan_insufficient(self, monkeypatch):
+        from radar_ev.http_client import ApiPlanInsufficientError
+        from radar_ev.orchestrator import main
+
+        async def boom(*args, **kwargs):
+            raise ApiPlanInsufficientError(
+                "Plano da API-Football sem acesso: "
+                "Free plans do not have access to this season"
+            )
+
+        monkeypatch.setattr("radar_ev.orchestrator._run_real_pipeline", boom)
+        assert main([]) == 3
+
+    def test_main_returns_4_when_generic_api_error(self, monkeypatch):
+        from radar_ev.http_client import ApiError
+        from radar_ev.orchestrator import main
+
+        async def boom(*args, **kwargs):
+            raise ApiError("Erro da API-Football: invalid parameter")
+
+        monkeypatch.setattr("radar_ev.orchestrator._run_real_pipeline", boom)
+        assert main([]) == 4
+
     def test_main_returns_1_when_resolution_fails(self, monkeypatch):
         from radar_ev.orchestrator import main
 

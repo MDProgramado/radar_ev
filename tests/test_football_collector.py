@@ -6,7 +6,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch, MagicMock
 from radar_ev.collectors.football_api import FootballAPICollector
-from radar_ev.http_client import ApiQuotaExhaustedError
+from radar_ev.http_client import ApiError, ApiPlanInsufficientError, ApiQuotaExhaustedError
 from radar_ev.models import Match
 
 
@@ -175,6 +175,59 @@ async def test_get_today_matches_raises_on_quota_exhausted():
 
             with pytest.raises(ApiQuotaExhaustedError):
                 await collector.get_today_matches(datetime(2025, 4, 2))
+
+
+@pytest.mark.asyncio
+async def test_get_today_matches_raises_on_plan_insufficient():
+    """Errors com mensagem de plano ('Free plans do not have access...')
+    → levanta ApiPlanInsufficientError (exit 3), NÃO quota."""
+    mock_response = {
+        "get": "/fixtures",
+        "errors": {
+            "plan": "Free plans do not have access to this season"
+        },
+        "results": 0,
+    }
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=mock_response)
+
+        with patch("radar_ev.cache.cache") as mock_cache:
+            mock_cache.get = AsyncMock(return_value=None)
+            mock_cache.set = AsyncMock()
+
+            with pytest.raises(ApiPlanInsufficientError):
+                await collector.get_today_matches(datetime(2025, 4, 2))
+
+
+@pytest.mark.asyncio
+async def test_get_today_matches_raises_on_generic_api_error():
+    """Errors não-vazio sem palavra-chave de quota/plano
+    → levanta ApiError genérico (exit 4), não trata como sucesso."""
+    mock_response = {
+        "get": "/fixtures",
+        "errors": {
+            "parameter": "Invalid value for parameter date"
+        },
+        "results": 0,
+    }
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=mock_response)
+
+        with patch("radar_ev.cache.cache") as mock_cache:
+            mock_cache.get = AsyncMock(return_value=None)
+            mock_cache.set = AsyncMock()
+
+            with pytest.raises(ApiError) as excinfo:
+                await collector.get_today_matches(datetime(2025, 4, 2))
+
+        assert not isinstance(excinfo.value, ApiQuotaExhaustedError)
+        assert not isinstance(excinfo.value, ApiPlanInsufficientError)
 
 
 @pytest.mark.asyncio
