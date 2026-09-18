@@ -137,23 +137,38 @@ class FootballAPICollector:
                 )
                 continue
 
-        logger.info("matches_fetched", count=len(matches), date=date.strftime("%Y-%m-%d"))
         return matches
 
-    async def get_odds(self, fixture_id: int) -> List[Odds]:
-        """Busca odds da Betano para uma partida via /odds.
+    async def get_odds(
+        self,
+        fixture_id: int,
+        bookmakers: Optional[List[str]] = None,
+    ) -> List[Odds]:
+        """Busca odds de uma partida via /odds para uma ou mais casas.
 
-        Filtra apenas odds do bookmaker "Betano". Se a Betano não estiver
-        disponível, retorna lista vazia (esperado para muitas ligas).
+        Por padrão coleta da Betano E da Pinnacle. A Pinnacle tem margem
+        ~2% (Betano ~5-8%) e serve como referência de "odd justa" do mercado:
+        comparar a odd capturada com a Pinnacle permite detectar value betting
+        sem depender de estatísticas de time. Cada Odds carrega ``offered_by``
+        com o nome (lowercase) da casa — o campo ``source``.
+
+        Se nenhuma das casas configuradas estiver disponível, retorna lista
+        vazia (esperado para muitas ligas).
 
         Args:
             fixture_id: ID da partida na API-Football.
+            bookmakers: Casas a incluir (lowercase). Default: betano+pinnacle.
 
         Returns:
-            Lista de Odds da Betano para todos os mercados disponíveis.
+            Lista de Odds de todas as casas configuradas, com ``offered_by``
+            indicando a fonte (betano/pinnacle).
         """
+        if bookmakers is None:
+            bookmakers = ["betano", "pinnacle"]
+
         endpoint = "/odds"
         params = {"fixture": fixture_id}
+        bookmaker_set = {name.lower() for name in bookmakers}
 
         try:
             data = await self.client.get(endpoint, params=params)
@@ -162,8 +177,9 @@ class FootballAPICollector:
 
             for fixture_data in data.get("response", []):
                 for bookmaker in fixture_data.get("bookmakers", []):
-                    # Filtra apenas Betano
-                    if bookmaker.get("name", "").lower() != "betano":
+                    bookmaker_name = bookmaker.get("name", "").lower()
+                    # Filtra apenas pelas casas configuradas
+                    if bookmaker_name not in bookmaker_set:
                         continue
 
                     for bet in bookmaker.get("bets", []):

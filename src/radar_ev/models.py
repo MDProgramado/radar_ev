@@ -63,6 +63,11 @@ class Odds(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @property
+    def source(self) -> str:
+        """Casa de apostas que ofereceu a odd (betano/pinnacle)."""
+        return self.offered_by
+
 
 class Prediction(BaseModel):
     """Predição gerada pelo modelo estatístico.
@@ -126,6 +131,10 @@ class Opportunity(BaseModel):
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="Data e hora em que a oportunidade foi encontrada",
+    )
+    offered_by: str = Field(
+        "betano",
+        description="Casa que ofereceu a odd capturada (betano/pinnacle)",
     )
 
     model_config = ConfigDict(from_attributes=True)

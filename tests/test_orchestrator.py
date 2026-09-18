@@ -11,10 +11,13 @@ from radar_ev.orchestrator import (
     _calculate_ev_without_vig,
     _complementary_odd,
     _count_resolved,
+    _fetch_future_matches,
     _filter_matches,
     _extract_threshold,
+    _find_pinnacle_reference,
     _get_prediction_for_market,
     _parse_market,
+    _process_match_odds,
     _report_fallback_alert,
     _run_result_resolution,
 )
@@ -217,6 +220,75 @@ class TestParseMarketWhitelist:
 
     def test_three_decimals_rejected(self):
         assert _parse_market("corners_over_9.555") is None
+
+
+class TestPinnacleReference:
+    """Pinnacle como referência de odd justa (edge real: margem ~2%)."""
+
+    def test_finds_reference_for_same_market(self):
+        pinnacle = [
+            Odds(match_id=1, market="goals_over_2.5", odd_value=2.20, offered_by="pinnacle"),
+            Odds(match_id=1, market="goals_under_2.5", odd_value=1.72, offered_by="pinnacle"),
+        ]
+        assert _find_pinnacle_reference("goals_over_2.5", pinnacle) == 2.20
+
+    def test_no_reference_when_market_differs(self):
+        pinnacle = [Odds(match_id=1, market="goals_under_2.5", odd_value=1.72, offered_by="pinnacle")]
+        assert _find_pinnacle_reference("corners_over_9.5", pinnacle) is None
+
+    def test_no_reference_when_no_pinnacle(self):
+        assert _find_pinnacle_reference("goals_over_2.5", None) is None
+        assert _find_pinnacle_reference("goals_over_2.5", []) is None
+
+    @pytest.mark.asyncio
+    async def test_process_match_odds_saves_pinnacle_reference(self):
+        from radar_ev.models import Opportunity
+
+        match = _match()
+        betano_odds = [
+            Odds(match_id=match.id, market="goals_over_2.5", odd_value=2.10, offered_by="betano"),
+            Odds(match_id=match.id, market="goals_under_2.5", odd_value=1.70, offered_by="betano"),
+        ]
+        pinnacle_odds = [
+            Odds(match_id=match.id, market="goals_over_2.5", odd_value=2.20, offered_by="pinnacle"),
+        ]
+        pred = Prediction(
+            match_id=match.id,
+            market="goals_over_2.5",
+            probability=0.55,
+            fair_odd=1.82,
+            model_version="test",
+        )
+        opp = Opportunity(
+            match=match,
+            market="goals_over_2.5",
+            fair_odd=1.82,
+            offered_odd=2.10,
+            ev_percent=12.0,
+            confidence=0.55,
+            reasoning="test",
+        )
+        import radar_ev.database as database_module
+
+        mock_db = Mock()
+        mock_db.save_opportunity = Mock()
+        with (
+            patch(
+                "radar_ev.orchestrator._get_prediction_for_market",
+                new=AsyncMock(return_value=pred),
+            ),
+            patch("radar_ev.orchestrator.create_opportunity", return_value=opp),
+            patch("radar_ev.orchestrator.apply_all_rules", return_value=(True, "")),
+            patch.object(database_module, "db", mock_db),
+        ):
+            opps = await _process_match_odds(
+                match, betano_odds, AsyncMock(), pinnacle_odds=pinnacle_odds
+            )
+
+        assert len(opps) == 1
+        mock_db.save_opportunity.assert_called_once()
+        _, kwargs = mock_db.save_opportunity.call_args
+        assert kwargs.get("pinnacle_reference_odd") == 2.20
 
 
 class TestGetPredictionForMarket:

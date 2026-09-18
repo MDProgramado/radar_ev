@@ -204,4 +204,5 @@ def create_opportunity(
         reasoning=reasoning,
         vig_removed=vig_removed,
         vig_divergente=vig_divergente,
+        offered_by=odds.offered_by,
     )

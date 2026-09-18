@@ -73,6 +73,10 @@ class ResultResolver:
                     if status_short not in ["FT", "AET", "PEN"]:
                         continue  # Jogo ainda não terminou ou foi cancelado
 
+                    # Persiste o placar real (independente do mercado) — dado
+                    # para treinar o modelo Dixon-Coles (INSERT OR REPLACE).
+                    self._save_match_result(fixture_data)
+
                     # Avalia a aposta
                     won = self._evaluate_bet(market, fixture_data)
                     if won is None:
@@ -168,6 +172,46 @@ class ResultResolver:
         except Exception as e:
             logger.error("evaluate_bet_failed", market=market, error=str(e))
             return None
+
+    def _save_match_result(self, fixture_data: dict) -> None:
+        """Insere/atualiza o placar real em ``match_results`` (idempotente).
+
+        Extrai de /fixtures?id=X: ``fixture.goals.home`` e
+        ``fixture.goals.away``, além de times/liga/temporada. Usa INSERT OR
+        REPLACE para que re-resoluções não dupliquem linhas (match_id é a chave).
+        """
+        status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
+        if status_short not in ["FT", "AET", "PEN"]:
+            return
+
+        goals = fixture_data.get("goals", {}) or {}
+        teams = fixture_data.get("teams", {}) or {}
+        league = fixture_data.get("league", {}) or {}
+        match_id = fixture_data.get("fixture", {}).get("id")
+        if match_id is None:
+            return
+
+        try:
+            with get_db_connection(self.db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO match_results (
+                        match_id, home_team, away_team, home_score, away_score,
+                        league, season, resolved_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    match_id,
+                    (teams.get("home") or {}).get("name"),
+                    (teams.get("away") or {}).get("name"),
+                    goals.get("home"),
+                    goals.get("away"),
+                    league.get("name"),
+                    league.get("season"),
+                    datetime.now(timezone.utc).isoformat(),
+                ))
+                conn.commit()
+            logger.info("match_result_saved", match_id=match_id)
+        except Exception as exc:
+            logger.error("match_result_save_failed", match_id=match_id, error=str(exc))
 
     def _update_opportunity(self, opp_id: int, won: bool, profit: float):
         """Atualiza a linha no banco de dados para RESOLVED."""

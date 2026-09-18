@@ -68,6 +68,81 @@ async def test_get_odds_betano_filter():
 
 
 @pytest.mark.asyncio
+async def test_get_odds_betano_and_pinnacle():
+    """Mock com Betano + Pinnacle → ambas as casas são processadas.
+
+    A Pinnacle (margem ~2%) é a referência de odd justa: get_odds precisa
+    devolver as duas casas com o campo ``source``/``offered_by`` correto para
+    o orquestrador salvar a referência na odds_timeline.
+    """
+    mock_response = {
+        "response": [{
+            "bookmakers": [
+                {"name": "Betano", "bets": [
+                    {"name": "Goals Over/Under", "values": [
+                        {"value": "Over 2.5", "odd": "1.85"},
+                        {"value": "Under 2.5", "odd": "1.95"},
+                    ]}
+                ]},
+                {"name": "Pinnacle", "bets": [
+                    {"name": "Goals Over/Under", "values": [
+                        {"value": "Over 2.5", "odd": "1.90"},
+                        {"value": "Under 2.5", "odd": "1.92"},
+                    ]}
+                ]},
+            ]
+        }]
+    }
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=mock_response)
+
+        odds = await collector.get_odds(123456)
+
+    assert len(odds) == 4
+    sources = {o.offered_by for o in odds}
+    assert sources == {"betano", "pinnacle"}
+    betano_over = next(o for o in odds if o.offered_by == "betano" and o.market == "goals_over_2.5")
+    pinnacle_over = next(o for o in odds if o.offered_by == "pinnacle" and o.market == "goals_over_2.5")
+    assert betano_over.odd_value == 1.85
+    assert pinnacle_over.odd_value == 1.90
+    assert betano_over.source == "betano"
+    assert pinnacle_over.source == "pinnacle"
+
+
+@pytest.mark.asyncio
+async def test_get_odds_custom_bookmakers_filter():
+    """bookmakers=['betano'] mantém o comportamento legado (só Betano)."""
+    mock_response = {
+        "response": [{
+            "bookmakers": [
+                {"name": "Betano", "bets": [
+                    {"name": "Corners", "values": [
+                        {"value": "Over 9.5", "odd": "1.85"}
+                    ]}
+                ]},
+                {"name": "Pinnacle", "bets": [
+                    {"name": "Corners", "values": [
+                        {"value": "Over 9.5", "odd": "1.80"}
+                    ]}
+                ]}
+            ]
+        }]
+    }
+
+    with patch.object(FootballAPICollector, '__init__', lambda self: None):
+        collector = FootballAPICollector()
+        collector.client = MagicMock()
+        collector.client.get = AsyncMock(return_value=mock_response)
+
+        odds = await collector.get_odds(123456, bookmakers=["betano"])
+        assert len(odds) == 1
+        assert odds[0].offered_by == "betano"
+
+
+@pytest.mark.asyncio
 async def test_get_odds_no_betano():
     """Testa resposta vazia quando Betano não está disponível."""
     mock_response = {

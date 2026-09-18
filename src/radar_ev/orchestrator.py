@@ -152,6 +152,26 @@ MARKET_THRESHOLD_RANGES = {
 }
 
 
+def _find_pinnacle_reference(market: str, pinnacle_odds: Optional[list] = None) -> Optional[float]:
+    """Retorna a odd da Pinnacle para o mesmo mercado/linha, se existir.
+
+    A Pinnacle (margem ~2%) é a referência de preço justo do mercado; a odd
+    capturada na Betano comparada à da Pinnacle revela value betting sem
+    precisar das estatísticas do modelo.
+
+    Args:
+        market: Nome canônico do mercado (ex: "goals_over_2.5").
+        pinnacle_odds: Lista de Odds da Pinnacle; None/vazia → sem referência.
+
+    Returns:
+        Odd da Pinnacle para o mercado, ou None.
+    """
+    for odds in pinnacle_odds or []:
+        if odds.market == market:
+            return float(odds.odd_value)
+    return None
+
+
 def _complementary_odd(market: str, odds_list: list) -> Optional[float]:
     """Retorna a odd bruta do resultado complementar (Under↔Over, mesma linha).
 
@@ -450,19 +470,34 @@ async def _run_real_pipeline(league_filter: Optional[str] = None) -> List[Opport
                 # Rate limit: pausa entre chamadas
                 await asyncio.sleep(RATE_LIMIT_DELAY)
 
-                # 3a. Busca odds da Betano
+                # 3a. Busca odds da Betano E da Pinnacle (referência de preço)
                 odds_list = await football.get_odds(match.id)
                 if not odds_list:
                     print(f"  ⏭️ Sem odds da Betano — pulando.\n")
                     continue
 
-                print(f"  📊 {len(odds_list)} odds encontradas.")
+                betano_odds = [o for o in odds_list if o.offered_by == "betano"]
+                pinnacle_odds = [o for o in odds_list if o.offered_by == "pinnacle"]
+
+                if not betano_odds:
+                    print(f"  ⏭️ Sem odds da Betano — pulando.\n")
+                    continue
+                if not pinnacle_odds:
+                    logger.warning(
+                        "pinnacle_odds_missing",
+                        match_id=match.id,
+                        message="Pinnacle não publicou odds para este jogo — "
+                                "seguindo apenas com a Betano.",
+                    )
+
+                print(f"  📊 {len(betano_odds)} odds Betano + {len(pinnacle_odds)} Pinnacle.")
 
                 # 3b. Para cada odd, gera predição e calcula EV
                 match_opps = await _process_match_odds(
                     match=match,
-                    odds_list=odds_list,
+                    odds_list=betano_odds,
                     football_api=football,
+                    pinnacle_odds=pinnacle_odds,
                 )
                 opportunities.extend(match_opps)
                 print()
@@ -504,6 +539,7 @@ async def _process_match_odds(
     match: Match,
     odds_list: list,
     football_api: object,
+    pinnacle_odds: Optional[list] = None,
 ) -> List[Opportunity]:
     """Processa todas as odds de uma partida, gerando predições e filtrando por EV e regras.
 
@@ -511,6 +547,9 @@ async def _process_match_odds(
         match: Partida a ser processada.
         odds_list: Lista de odds da Betano.
         football_api: Instância do collector.
+        pinnacle_odds: Lista de odds da Pinnacle (referência de preço justo).
+            Quando há odd da Pinnacle para o mesmo mercado/linha, ela é salva
+            em odds_timeline e em opportunities.pinnacle_reference_odd.
 
     Returns:
         Lista de oportunidades aprovadas.
@@ -527,6 +566,9 @@ async def _process_match_odds(
 
         if pred is None:
             continue
+
+        # Referência da Pinnacle (antes do market ser convertido p/ nome amigável)
+        pinnacle_ref = _find_pinnacle_reference(odds.market, pinnacle_odds)
 
         # Calcula EV (strict: sem par Over/Under exato, a odd bruta órfã
         # não gera oportunidade — EV incomparável, fonte dos EVs absurdos)
@@ -560,10 +602,10 @@ async def _process_match_odds(
             if ok:
                 opportunities.append(opp)
                 
-                # Salva no banco de dados
+                # Salva no banco de dados (inclui snapshot da odd + referência Pinnacle)
                 try:
                     from radar_ev.database import db
-                    db.save_opportunity(opp)
+                    db.save_opportunity(opp, pinnacle_reference_odd=pinnacle_ref)
                 except Exception as e:
                     logger.error("database_save_failed", error=str(e))
                     
