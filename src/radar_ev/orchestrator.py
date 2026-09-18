@@ -203,7 +203,8 @@ def _calculate_ev_without_vig(
     offered_odd: float,
     market: str,
     odds_list: list,
-) -> tuple[float, bool, bool]:
+    strict: bool = False,
+) -> Optional[tuple[float, bool, bool]]:
     """Calcula o EV usando a odd justa (sem vig) quando o par Over/Under existe.
 
     Se o mercado complementar não estiver na lista (ex: mock), cai para o EV
@@ -211,8 +212,21 @@ def _calculate_ev_without_vig(
     existe complemento apenas com limiar divergente, marca ``limiar_divergente``
     (contado separadamente para decidir interpolação futura).
 
+    Com ``strict=True`` (pipeline real), mercado SEM par exato é DESCARTADO
+    (retorna None): sem o resultado complementar não é possível remover o vig,
+    e a odd bruta de um mercado órfão gera EV incomparável (fonte dos EV
+    absurdos de 822%, 527%...). O mock mantém o fallback para o dado sintético.
+
+    Args:
+        prediction: Predição do modelo.
+        offered_odd: Odd bruta do mercado avaliado.
+        market: Nome do mercado avaliado (ex: "corners_over_9.5").
+        odds_list: Lista de odds da mesma partida.
+        strict: Se True, retorna None quando o par não existe.
+
     Returns:
-        Tupla ``(ev_percent, vig_removed, limiar_divergente)``.
+        Tupla ``(ev_percent, vig_removed, limiar_divergente)``, ou None se
+        ``strict`` e o par Over/Under não for encontrado.
     """
     complementary = _complementary_odd(market, odds_list)
     vig_used = complementary is not None
@@ -226,9 +240,11 @@ def _calculate_ev_without_vig(
         "complementary_odd_not_found",
         match_id=getattr(prediction, "match_id", None),
         market=market,
-        fallback="raw_odd",
+        fallback="skip" if strict else "raw_odd",
         limiar_divergente=divergent,
     )
+    if strict:
+        return None
     return calculate_ev(prediction, offered_odd), False, divergent
 
 
@@ -499,8 +515,14 @@ async def _process_match_odds(
         if pred is None:
             continue
 
-        # Calcula EV
-        ev, vig_used, vig_divergente = _calculate_ev_without_vig(pred, odds.odd_value, odds.market, odds_list)
+        # Calcula EV (strict: sem par Over/Under exato, a odd bruta órfã
+        # não gera oportunidade — EV incomparável, fonte dos EVs absurdos)
+        ev_result = _calculate_ev_without_vig(
+            pred, odds.odd_value, odds.market, odds_list, strict=True
+        )
+        if ev_result is None:
+            continue
+        ev, vig_used, vig_divergente = ev_result
 
         market_amigavel = format_market_name(odds.market)
         odds.market = market_amigavel

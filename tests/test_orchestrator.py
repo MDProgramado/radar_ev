@@ -378,6 +378,57 @@ class TestVigFallback:
         )
         assert divergent is False
 
+    def test_strict_without_pair_returns_none(self, caplog):
+        # Bug 1: pipeline real (strict) DESCARTAR mercado sem par Over/Under
+        # exato — odd bruta órfã não pode gerar oportunidade (EV incomparável).
+        vig_stats.reset()
+        pred = self._pred(0.55)
+        odds_list = [self._odds("corners_over_9.5", 2.10)]
+        with caplog.at_level("WARNING"):
+            result = _calculate_ev_without_vig(
+                pred, 2.10, "corners_over_9.5", odds_list, strict=True
+            )
+        assert result is None
+        assert vig_stats.fallback == 1
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("complementary_odd_not_found" in r.getMessage() for r in warnings)
+        assert any("fallback='skip'" in r.getMessage() for r in warnings)
+
+    def test_strict_with_pair_returns_ev(self):
+        # strict não muda nada quando o par existe.
+        vig_stats.reset()
+        pred = self._pred(0.55)
+        odds_list = [
+            self._odds("corners_over_9.5", 2.10),
+            self._odds("corners_under_9.5", 1.75),
+        ]
+        result = _calculate_ev_without_vig(
+            pred, 2.10, "corners_over_9.5", odds_list, strict=True
+        )
+        assert result is not None
+        ev, vig_used, divergent = result
+        assert vig_used is True
+        assert divergent is False
+        assert ev == pytest.approx(calculate_ev_vig_removed(pred, 2.10, 1.75))
+        assert vig_stats.with_vig == 1
+
+    def test_strict_divergent_line_returns_none(self, caplog):
+        # Linha DIFERENTE não é par → também descartado em modo estrito
+        # (candidato a interpolação futura, nunca a oportunidade).
+        vig_stats.reset()
+        pred = self._pred(0.55)
+        odds_list = [
+            self._odds("corners_over_9.5", 2.10),
+            self._odds("corners_under_10.5", 1.75),
+        ]
+        with caplog.at_level("WARNING"):
+            result = _calculate_ev_without_vig(
+                pred, 2.10, "corners_over_9.5", odds_list, strict=True
+            )
+        assert result is None
+        assert vig_stats.fallback == 1
+        assert vig_stats.fallback_limiar_divergente == 1
+
 
 class TestVigFallbackStats:
     """Contadores: % de oportunidades com vig removido vs. fallback."""
