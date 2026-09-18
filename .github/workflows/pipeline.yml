@@ -19,9 +19,9 @@
 name: Radar +EV pipeline
 
 on:
-  schedule:
-    - cron: '0 12,18 * * *'   # fetch + predict (09h/15h BRT)
-    - cron: '0 23 * * *'      # resolve apenas (20h BRT)
+  # schedule:
+  #   - cron: '0 12,18 * * *'   # fetch + predict (09h/15h BRT)
+  #   - cron: '0 23 * * *'      # resolve apenas (20h BRT)
   workflow_dispatch:
     inputs:
       TASK:
