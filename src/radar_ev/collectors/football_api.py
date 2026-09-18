@@ -103,6 +103,80 @@ class FootballAPICollector:
         # orquestrador encerrar com código próprio (2/3/4).
         _check_api_errors(data, endpoint)
 
+        matches = self._parse_matches(data)
+
+        logger.info("matches_fetched", count=len(matches), date=date.strftime("%Y-%m-%d"))
+        return matches
+
+    async def get_league_matches(
+        self,
+        league_id: int,
+        season: int,
+        date_from: datetime,
+        date_to: datetime,
+    ) -> List[Match]:
+        """Busca partidas de UMA liga na janela [from, to] via /fixtures.
+
+        Endpoint: /fixtures?league=X&season=Y&from=AAA&to=BBB — a coleta por
+        liga evita perder jogos que passam da meia-noite (o filtro por data
+        isolada os perde) e permite correlação por liga nos dados.
+
+        Args:
+            league_id: ID da liga na API-Football.
+            season: Temporada (ex: 2024).
+            date_from: Início da janela (usa apenas a data).
+            date_to: Fim da janela (usa apenas a data).
+
+        Returns:
+            Lista de objetos Match (a deduplicação por fixture.id fica a cargo
+            do orquestrador, pois um jogo pode aparecer em várias ligas).
+        """
+        endpoint = "/fixtures"
+        params = {
+            "league": league_id,
+            "season": season,
+            "from": date_from.strftime("%Y-%m-%d"),
+            "to": date_to.strftime("%Y-%m-%d"),
+            "timezone": "America/Sao_Paulo",
+        }
+
+        try:
+            from radar_ev.cache import cache
+
+            cache_key = f"fixtures_league_{league_id}_{season}_{params['from']}_{params['to']}"
+            data = await cache.get(cache_key)
+            if not data:
+                data = await self.client.get(endpoint, params=params)
+                if data and data.get("response"):
+                    await cache.set(cache_key, data, ttl_hours=4)
+
+            _check_api_errors(data, endpoint)
+            matches = self._parse_matches(data)
+            logger.info(
+                "league_matches_fetched",
+                league_id=league_id,
+                season=season,
+                count=len(matches),
+            )
+            return matches
+
+        except RateLimitError:
+            logger.warning("league_matches_rate_limited", league_id=league_id)
+            raise
+
+        except ApiError:
+            raise  # Erro classificado (quota/plano/genérico) — orquestrador decide
+
+        except Exception as exc:
+            logger.error(
+                "league_matches_failed",
+                league_id=league_id,
+                error=str(exc),
+            )
+            return []
+
+    def _parse_matches(self, data: dict) -> List[Match]:
+        """Converte a resposta de /fixtures em objetos Match (compartilhado)."""
         matches: List[Match] = []
 
         for fixture in data.get("response", []):
@@ -204,7 +278,7 @@ class FootballAPICollector:
                                             match_id=fixture_id,
                                             market=market_name,
                                             odd_value=odd_value,
-                                            offered_by="betano",
+                                            offered_by=bookmaker_name,
                                         )
                                     )
                             except (ValueError, TypeError):
@@ -214,7 +288,7 @@ class FootballAPICollector:
                 "odds_fetched",
                 fixture_id=fixture_id,
                 count=len(odds_list),
-                bookmaker="betano",
+                bookmakers=sorted(bookmaker_set),
             )
             return odds_list
 

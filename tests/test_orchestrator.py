@@ -1018,6 +1018,85 @@ class TestLeagueFilterDiagnostics:
         assert not any("league_filter_no_matches" in r.getMessage() for r in warnings)
 
 
+class TestFetchFutureMatchesByLeague:
+    """Coleta por liga: /fixtures?league=X&season=Y&from=today&to=tomorrow."""
+
+    @staticmethod
+    def _league_match(match_id: int, day_offset: int = 2):
+        return Match(
+            id=match_id,
+            home_team=f"Home{match_id}",
+            away_team=f"Away{match_id}",
+            datetime=datetime.now(timezone.utc) + timedelta(days=day_offset),
+            league="Serie A",
+            home_team_id=101,
+            away_team_id=102,
+            league_id=71,
+            season=2026,
+        )
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_across_leagues(self, monkeypatch):
+        """2 ligas com o mesmo jogo (id 10) → 1 jogo único na saída."""
+        from radar_ev.config import settings
+
+        shared = self._league_match(10)
+        extra_league_a = self._league_match(11)
+        extra_league_b = self._league_match(12)
+
+        football = Mock()
+        football.get_league_matches = AsyncMock(
+            side_effect=[
+                [shared, extra_league_a],  # liga 71
+                [shared, extra_league_b],  # liga 61 (sobreposição no id 10)
+            ]
+        )
+
+        monkeypatch.setattr(settings, "leagues", [71, 61])
+        matches = await _fetch_future_matches(football)
+
+        assert [m.id for m in matches] == [10, 11, 12]
+        assert football.get_league_matches.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_league_failure_does_not_abort(self, monkeypatch, caplog):
+        """Liga 71 falha → liga 61 continua produzindo jogos (não aborta)."""
+        from radar_ev.config import settings
+
+        good = self._league_match(21)
+
+        football = Mock()
+        football.get_league_matches = AsyncMock(
+            side_effect=[
+                RuntimeError("boom na liga 71"),
+                [good],
+            ]
+        )
+
+        monkeypatch.setattr(settings, "leagues", [71, 61])
+        with caplog.at_level("WARNING"):
+            matches = await _fetch_future_matches(football)
+
+        assert [m.id for m in matches] == [21]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("league_fetch_failed" in r.getMessage() for r in warnings)
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_date_based_without_leagues(self, monkeypatch):
+        """Sem ligas configuradas → comportamento legado (get_today_matches)."""
+        from radar_ev.config import settings
+
+        legacy_match = self._league_match(31)
+        football = Mock()
+        football.get_today_matches = AsyncMock(return_value=[legacy_match])
+
+        monkeypatch.setattr(settings, "leagues", [])
+        matches = await _fetch_future_matches(football)
+
+        assert [m.id for m in matches] == [31]
+        football.get_today_matches.assert_awaited_once()
+
+
 class TestMainExitCodes:
     """Exit code do processo: 0 sucesso, 1 falha (crash ou exceção)."""
 

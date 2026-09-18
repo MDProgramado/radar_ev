@@ -793,14 +793,76 @@ def _filter_matches(matches: List[Match], league_filter: Optional[str] = None) -
 
 
 async def _fetch_future_matches(football, days_to_check: Optional[int] = None) -> List[Match]:
-    """Busca partidas da janela de operação (hoje + dias) via API."""
+    """Busca partidas da janela de operação, priorizando coleta por liga.
+
+    Com ligas configuradas (``settings.LEAGUES``), busca **por liga** via
+    ``/fixtures?league=X&season=SEASON&from=today&to=tomorrow`` — evita perder
+    jogos que passam da meia-noite e sinaliza a liga de cada jogo. O resultado
+    é deduplicado por ``fixture.id`` (um jogo pode aparecer em várias ligas).
+    Se uma liga falhar, as demais seguem (não aborta); erros de conta
+    (quota/plano) continuam abortando com o exit code próprio.
+
+    Sem ligas configuradas, cai no comportamento legado: busca por data
+    (/fixtures?date=) para cada dia da janela.
+
+    Args:
+        football: Instância do FootballAPICollector.
+        days_to_check: Nº de dias da janela (default de settings.pre_match_hours).
+
+    Returns:
+        Lista de partidas únicas (por id) de todas as ligas/datas.
+    """
     days_to_check = days_to_check or max(1, int(settings.pre_match_hours / 24) + 1)
     today = datetime.now(timezone.utc)
     all_matches: List[Match] = []
-    for d in range(days_to_check):
-        target_date = today + timedelta(days=d)
-        matches_for_day = await football.get_today_matches(target_date)
-        all_matches.extend(matches_for_day)
+    seen_ids: set = set()
+
+    league_ids = list(settings.leagues)
+    if league_ids:
+        season = settings.season
+        date_to = today + timedelta(days=max(0, days_to_check - 1))
+        for league_id in league_ids:
+            try:
+                league_matches = await football.get_league_matches(
+                    league_id, season, today, date_to
+                )
+            except (ApiQuotaExhaustedError, ApiPlanInsufficientError):
+                # Erro global de conta: não tem por que continuar nas outras ligas.
+                raise
+            except ApiError as exc:
+                logger.warning(
+                    "league_fetch_api_error",
+                    league_id=league_id,
+                    error=str(exc),
+                    message="Liga falhou (erro classificado) — seguindo para as demais.",
+                )
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "league_fetch_failed",
+                    league_id=league_id,
+                    error=str(exc),
+                )
+                continue
+
+            for match in league_matches:
+                if match.id in seen_ids:
+                    continue
+                seen_ids.add(match.id)
+                all_matches.append(match)
+    else:
+        # Fallback legado: coleta por data (sem correlação por liga).
+        for d in range(days_to_check):
+            target_date = today + timedelta(days=d)
+            matches_for_day = await football.get_today_matches(target_date)
+            all_matches.extend(matches_for_day)
+
+    logger.info(
+        "future_matches_fetched",
+        count=len(all_matches),
+        by_league=bool(league_ids),
+        days=days_to_check,
+    )
     return all_matches
 
 

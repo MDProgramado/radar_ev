@@ -5,7 +5,7 @@ Utiliza pydantic-settings para carregar automaticamente as variáveis do arquivo
 validar tipos e expor a instância global `settings` para uso em todos os módulos.
 """
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 from pathlib import Path
@@ -42,6 +42,32 @@ class Settings(BaseSettings):
             "(plano Free cobre até 2024)"
         ),
     )
+    # IDs de ligas da API-Football usados na coleta por liga
+    # (/fixtures?league=X&season=Y&from=...&to=...). A coleta por liga evita
+    # perder jogos após meia-noite e facetas a correlação por liga. Aceita
+    # formato CSV ("71,61,39") ou JSON ("[71,61,39]").
+    leagues: List[int] = Field(
+        [71, 61, 39, 140, 135, 78, 2, 3, 13],
+        alias="LEAGUES",
+        description=(
+            "IDs de ligas da API-Football para coleta por liga "
+            "(Brasil Série A, Ligue 1, Premier League, La Liga, "
+            "Serie A, Bundesliga, Champions League, Europa League, Libertadores)"
+        ),
+    )
+
+    @field_validator("leagues", mode="before")
+    @classmethod
+    def _parse_leagues(cls, value: object) -> object:
+        """Aceita LEAGUES como CSV ('71,61,39') ou lista JSON ('[71,61,39]')."""
+        if isinstance(value, str):
+            cleaned = value.strip().strip("[]\"'")
+            return [
+                int(part.strip())
+                for part in cleaned.split(",")
+                if part.strip().lstrip("-").isdigit()
+            ]
+        return value
 
     # ---- The Odds API (legado, mantido por compatibilidade) ----
     odds_api_key: str = Field(
