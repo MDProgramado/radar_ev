@@ -35,6 +35,8 @@ from radar_ev.ev_calculator import (
 )
 from radar_ev.vig_stats import vig_stats
 from radar_ev.http_client import (
+    ApiError,
+    ApiPlanInsufficientError,
     ApiQuotaExhaustedError,
     RateLimitError,
     get_api_request_count,
@@ -465,12 +467,15 @@ async def _run_real_pipeline(league_filter: Optional[str] = None) -> List[Opport
                 opportunities.extend(match_opps)
                 print()
 
-            except ApiQuotaExhaustedError:
+            except ApiError as exc:
                 logger.error(
-                    "api_football_quota_exhausted",
-                    message="Cota diária esgotada — encerrando pipeline (exit 2).",
+                    "api_football_api_error",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    message="Erro classificado da API — encerrando pipeline "
+                            "(quota=2, plano=3, genérico=4).",
                 )
-                raise  # Sem chance de resolver hoje; não continua processando
+                raise  # Não é crash nem retentável; encerra com código próprio
 
             except RateLimitError:
                 rate_limit_hits += 1
@@ -877,9 +882,10 @@ async def run_pipeline(
         logger.info("api_requests_used", count=get_api_request_count())
         return opportunities
 
-    except ApiQuotaExhaustedError:
-        # Cota diária esgotada: NÃO é um crash do pipeline (não conta como
-        # _pipeline_crashed). Propaga para main() retornar exit code 2.
+    except ApiError:
+        # Erro classificado de API (quota/plano/genérico): NÃO é um crash do
+        # pipeline (não conta como _pipeline_crashed). Propaga para main()
+        # mapear para o exit code próprio (2/3/4).
         raise
 
     except Exception as exc:
@@ -1048,9 +1054,9 @@ async def _daemon_loop(
         except KeyboardInterrupt:
             print("🛑 Daemon interrompido pelo usuário.")
             break
-        except ApiQuotaExhaustedError:
-            print("🛑 Cota diária esgotada — encerrando daemon (exit 2).")
-            raise  # Propaga para main() retornar 2; não adianta esperar 5 min
+        except ApiError:
+            print("🛑 Erro classificado da API em ciclo — encerrando daemon (exit 2/3/4).")
+            raise  # Propaga para main() mapear o exit code; não adianta esperar 5 min
         except Exception as e:
             print(f"💥 Erro no daemon: {e}")
             print(f"⏳ Tentando novamente em 5 minutos...")
@@ -1106,10 +1112,12 @@ def main(argv: Optional[list] = None) -> int:
     """Entry point para execução via CLI ou Poetry script.
 
     Returns:
-        Código de saída: 0 em caso de sucesso, 1 se o pipeline quebrou
-        (``pipeline_crashed``) ou se uma exceção não tratada propagou,
-        2 se a cota diária da API-Football estiver esgotada (distinto de
-        crash para monitoramento separado).
+        Código de saída:
+        0 — sucesso.
+        1 — pipeline quebrou (``pipeline_crashed``) ou exceção não tratada.
+        2 — cota diária da API-Football esgotada.
+        3 — plano da API-Football sem acesso (ex: temporada bloqueada).
+        4 — erro genérico classificado da API-Football (errors no JSON).
     """
     global _pipeline_crashed
     _pipeline_crashed = False
@@ -1124,6 +1132,22 @@ def main(argv: Optional[list] = None) -> int:
         )
         print(f"\n🛑 COTA DIÁRIA ESGOTADA (exit 2): {exc}")
         return 2
+    except ApiPlanInsufficientError as exc:
+        logger.error(
+            "api_football_plan_insufficient",
+            message="Plano da API-Football sem acesso. Encerrando (exit 3).",
+            error=str(exc),
+        )
+        print(f"\n🛑 PLANO INSUFICIENTE (exit 3): {exc}")
+        return 3
+    except ApiError as exc:
+        logger.error(
+            "api_football_error",
+            message="Erro genérico da API-Football. Encerrando (exit 4).",
+            error=str(exc),
+        )
+        print(f"\n🛑 ERRO DA API-FOOTBALL (exit 4): {exc}")
+        return 4
     except Exception as exc:
         logger.exception("cli_crashed", error=str(exc))
         print(f"\n💥 ERRO CRÍTICO: {exc}")

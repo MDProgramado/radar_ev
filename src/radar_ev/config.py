@@ -29,6 +29,19 @@ class Settings(BaseSettings):
         alias="RAPIDAPI_HOST",
         description="Host da API-Football",
     )
+    # Temporada usada nas consultas de estatísticas (/teams/statistics).
+    # IMPORTANTE: o plano Free da API-Football BLOQUEIA temporadas recentes
+    # (200 + errors {plan: "Free plans do not have access to this season,
+    # try from 2022 to 2024."}) — a temporada atual (2026) NÃO é acessível.
+    # Enquanto o plano for Free, manter 2024; atualizar ao mudar de plano.
+    season: int = Field(
+        2024,
+        alias="SEASON",
+        description=(
+            "Temporada histórica usada no /teams/statistics "
+            "(plano Free cobre até 2024)"
+        ),
+    )
 
     # ---- The Odds API (legado, mantido por compatibilidade) ----
     odds_api_key: str = Field(

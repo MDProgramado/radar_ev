@@ -19,34 +19,26 @@ import structlog
 
 from radar_ev.config import settings
 from radar_ev.http_client import (
-    ApiQuotaExhaustedError,
+    ApiError,
     HTTPClient,
     RateLimitError,
+    raise_for_api_errors,
 )
 from radar_ev.models import Match, Odds
 
 logger = structlog.get_logger(__name__)
 
 
-def _check_quota_errors(data: dict, endpoint: str) -> None:
-    """Levanta ApiQuotaExhaustedError se a resposta tiver ``errors`` preenchido.
+def _check_api_errors(data: dict, endpoint: str) -> None:
+    """Classifica e levanta erros de API-Football vindos no corpo do JSON.
 
-    A API-Football retorna HTTP 200 com ``results: 0`` e campo ``errors``
-    quando a cota diária estoura (ex: 442 partidas viram 0 em silêncio).
-    Sem essa checagem o pipeline trataria como sucesso e produziria 0
-    oportunidades sem nenhum sinal de erro.
+    A API-Football responde HTTP 200 com ``results: 0`` e campo ``errors``
+    quando a cota diária esgota (ex: 442 partidas viraram 0 em silêncio),
+    quando o plano não concede acesso, ou para outros erros. Delega para o
+    classificador central (http_client.raise_for_api_errors), que distingue:
+    quota (exit 2), plano insuficiente (exit 3) e erro genérico (exit 4).
     """
-    errors = data.get("errors")
-    if errors:
-        logger.error(
-            "api_football_quota_exhausted",
-            endpoint=endpoint,
-            errors=errors,
-            result_count=data.get("results"),
-        )
-        raise ApiQuotaExhaustedError(
-            f"Cota diária da API-Football esgotada ({endpoint}): {errors}"
-        )
+    raise_for_api_errors(data, endpoint)
 
 
 class FootballAPICollector:
@@ -106,10 +98,10 @@ class FootballAPICollector:
             if data and data.get("response"):
                 await cache.set(cache_key, data, ttl_hours=4)
 
-        # Cota diária esgotada: API-Football responde 200 com results:0 e
+        # Cota/plano/erro de API: API-Football responde 200 com results:0 e
         # errors preenchido. NÃO é sucesso silencioso — propaga para o
-        # orquestrador encerrar com código próprio (exit 2).
-        _check_quota_errors(data, endpoint)
+        # orquestrador encerrar com código próprio (2/3/4).
+        _check_api_errors(data, endpoint)
 
         matches: List[Match] = []
 
@@ -165,7 +157,7 @@ class FootballAPICollector:
 
         try:
             data = await self.client.get(endpoint, params=params)
-            _check_quota_errors(data, endpoint)
+            _check_api_errors(data, endpoint)
             odds_list: List[Odds] = []
 
             for fixture_data in data.get("response", []):
@@ -214,8 +206,8 @@ class FootballAPICollector:
             logger.warning("odds_rate_limited", fixture_id=fixture_id)
             raise  # Propaga para o orquestrador controlar
 
-        except ApiQuotaExhaustedError:
-            raise  # Cota diária esgotada — propaga → exit 2 no orquestrador
+        except ApiError:
+            raise  # Erro de API classificado (quota/plano/genérico) — propaga
 
         except Exception as exc:
             logger.error(
@@ -232,25 +224,40 @@ class FootballAPICollector:
 
         Usado pelo predictor para obter médias de escanteios, cartões, etc.
 
+        IMPORTANTE: a temporada efetivamente consultada é ``settings.season``,
+        NÃO o parâmetro ``season``. O plano Free da API-Football bloqueia a
+        temporada atual (ex: 2026) com 200 + errors {plan: ...}; as fixtures
+        trazem ``league.season`` = temporada corrente, mas as estatísticas só
+        existem para temporadas antigas no Free (até 2024).
+
         Args:
             team_id: ID do time na API-Football.
             league_id: ID da liga.
-            season: Temporada (ex: 2025).
+            season: Temporada "desejada" (mantida para compatibilidade de
+                assinatura; a requisição usa settings.season).
 
         Returns:
             Dicionário com a resposta completa da API.
         """
+        effective_season = settings.season
+        if effective_season != season:
+            logger.info(
+                "team_statistics_season_override",
+                requested_season=season,
+                effective_season=effective_season,
+                reason="plano Free bloqueia temporadas recentes (2025/2026)",
+            )
         endpoint = "/teams/statistics"
         params = {
             "team": team_id,
             "league": league_id,
-            "season": season,
+            "season": effective_season,
         }
 
         try:
             from radar_ev.cache import cache
-            cache_key = f"stats_{team_id}_{league_id}_{season}"
-            memory_key = (team_id, league_id, season)
+            cache_key = f"stats_{team_id}_{league_id}_{effective_season}"
+            memory_key = (team_id, league_id, effective_season)
 
             # 1) Cache em memória (desta execução): evita chamadas repetidas
             #    de /teams/statistics para o mesmo time/liga/temporada.
@@ -261,7 +268,7 @@ class FootballAPICollector:
                     "team_statistics_memory_cache_hit",
                     team_id=team_id,
                     league_id=league_id,
-                    season=season,
+                    season=effective_season,
                 )
                 return self._stats_cache[memory_key]
 
@@ -272,14 +279,14 @@ class FootballAPICollector:
                     "team_statistics_cache_hit",
                     team_id=team_id,
                     league_id=league_id,
-                    season=season,
+                    season=effective_season,
                 )
                 self._stats_cache[memory_key] = cached_data
                 return cached_data
 
             # 3) Sem cache: faz a requisição real à API
             data = await self.client.get(endpoint, params=params)
-            _check_quota_errors(data, endpoint)
+            _check_api_errors(data, endpoint)
 
             # Salva em memória SEMPRE; em disco só se houver resposta útil
             self._stats_cache[memory_key] = data
@@ -293,8 +300,8 @@ class FootballAPICollector:
                 season=season,
             )
             return data
-        except ApiQuotaExhaustedError:
-            raise  # Cota diária esgotada — propaga → exit 2 no orquestrador
+        except ApiError:
+            raise  # Erro de API classificado (quota/plano/genérico) — propaga
 
         except Exception as exc:
             logger.error(
@@ -325,14 +332,14 @@ class FootballAPICollector:
 
         try:
             data = await self.client.get(endpoint, params=params)
-            _check_quota_errors(data, endpoint)
+            _check_api_errors(data, endpoint)
             response = data.get("response", [])
             if response:
                 logger.info("lineups_fetched", fixture_id=fixture_id)
                 return data
             return None
-        except ApiQuotaExhaustedError:
-            raise  # Cota diária esgotada — propaga → exit 2 no orquestrador
+        except ApiError:
+            raise  # Erro de API classificado (quota/plano/genérico) — propaga
         except Exception as exc:
             logger.warning("lineups_fetch_failed", fixture_id=fixture_id, error=str(exc))
             return None

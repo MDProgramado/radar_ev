@@ -26,7 +26,7 @@ from typing import Optional
 import structlog
 from scipy.stats import poisson
 
-from radar_ev.http_client import ApiQuotaExhaustedError
+from radar_ev.http_client import ApiError
 from radar_ev.models import Prediction
 
 logger = structlog.get_logger(__name__)
@@ -415,8 +415,8 @@ async def make_corners_prediction(
             model_version="poisson_v1",
         )
 
-    except ApiQuotaExhaustedError:
-        raise  # Cota diária esgotada — não é fallback neutro, propaga (exit 2)
+    except ApiError:
+        raise  # Erro de API classificado — não é fallback neutro, propaga (exit 2/3/4)
 
     except Exception as exc:
         log.error("corners_prediction_failed", error=str(exc))
@@ -514,8 +514,8 @@ async def make_cards_prediction(
             model_version="poisson_cards_v1",
         )
 
-    except ApiQuotaExhaustedError:
-        raise  # Cota diária esgotada — não é fallback neutro, propaga (exit 2)
+    except ApiError:
+        raise  # Erro de API classificado — não é fallback neutro, propaga (exit 2/3/4)
 
     except Exception as exc:
         log.error("cards_prediction_failed", error=str(exc))
@@ -584,8 +584,8 @@ async def make_goals_prediction(
             model_version="poisson_goals_v2",
         )
 
-    except ApiQuotaExhaustedError:
-        raise  # Cota diária esgotada — não é fallback neutro, propaga (exit 2)
+    except ApiError:
+        raise  # Erro de API classificado — não é fallback neutro, propaga (exit 2/3/4)
 
     except Exception as exc:
         log.error("goals_prediction_failed", error=str(exc))

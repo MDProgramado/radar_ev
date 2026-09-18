@@ -50,17 +50,94 @@ class RateLimitError(HTTPClientError):
         super().__init__(message, status_code=429)
 
 
-class ApiQuotaExhaustedError(HTTPClientError):
-    """Cota diária da API-Football esgotada.
+class ApiError(HTTPClientError):
+    """Erro retornado pela API-Football no corpo JSON (HTTP 200 + errors).
 
-    A API-Football retorna HTTP 200 com ``results: 0`` e campo ``errors``
-    preenchido quando o limite diário de requisições é atingido. Esse erro é
-    DISTINTO de rate limit (429): não adianta retentar no mesmo dia, o
-    orquestrador deve encerrar o processo com código de saída próprio (2).
+    A API-Football responde 200 com ``results: 0`` e campo ``errors`` também
+    para falhas não relacionadas a limite. Este é o tipo base dos erros de
+    classificação; a subclasse indica o motivo e o exit code correspondente:
+    quota (2), plano (3), genérico (4).
     """
 
-    def __init__(self, message: str = "Cota diária da API-Football esgotada") -> None:
+    def __init__(self, message: str) -> None:
         super().__init__(message, status_code=200)
+
+
+class ApiQuotaExhaustedError(ApiError):
+    """Cota diária da API-Football esgotada (exit 2).
+
+    Não adianta retentar no mesmo dia; o orquestrador encerra o processo com
+    código de saída próprio (2), distinto de crash (1).
+    """
+
+
+class ApiPlanInsufficientError(ApiError):
+    """Plano da conta sem acesso ao recurso/saída pedido (exit 3).
+
+    Ex: "Free plans do not have access to this season". Resolver com
+    upgrade de plano; encerrar com código próprio (3).
+    """
+
+
+def _errors_text(errors: object) -> str:
+    """Serializa o campo ``errors`` para texto pesquisável."""
+    if isinstance(errors, dict):
+        return " ".join(str(v) for v in errors.values())
+    return str(errors)
+
+
+def raise_for_api_errors(data: dict, endpoint: str) -> None:
+    """Classifica e levanta o erro de API-Football vindo no corpo JSON.
+
+    A API-Football responde HTTP 200 com campo ``errors`` para COTA DIÁRIA
+    esgotada, PLANO insuficiente e outros erros. Classifica por palavra-chave
+    para não rotular tudo como "quota exhausted":
+
+    - "limit of request by day" / "quota" / "rate limit" → ApiQuotaExhaustedError (exit 2)
+    - "plan" / "do not have access" / "subscription" → ApiPlanInsufficientError (exit 3)
+    - qualquer outro errors não-vazio → ApiError (exit 4)
+
+    Args:
+        data: Resposta JSON da API-Football.
+        endpoint: Endpoint consultado (para o log estruturado).
+
+    Raises:
+        ApiQuotaExhaustedError, ApiPlanInsufficientError ou ApiError.
+    """
+    errors = data.get("errors")
+    if not errors:
+        return
+    text = _errors_text(errors).lower()
+
+    if "limit of request by day" in text or "quota" in text or "rate limit" in text:
+        logger.error(
+            "api_football_quota_exhausted",
+            endpoint=endpoint,
+            errors=errors,
+            result_count=data.get("results"),
+        )
+        raise ApiQuotaExhaustedError(
+            f"Cota diária da API-Football esgotada ({endpoint}): {errors}"
+        )
+
+    if "plan" in text or "do not have access" in text or "subscription" in text:
+        logger.error(
+            "api_football_plan_insufficient",
+            endpoint=endpoint,
+            errors=errors,
+            result_count=data.get("results"),
+        )
+        raise ApiPlanInsufficientError(
+            f"Plano da API-Football sem acesso ({endpoint}): {errors}"
+        )
+
+    logger.error(
+        "api_football_error",
+        endpoint=endpoint,
+        errors=errors,
+        result_count=data.get("results"),
+    )
+    raise ApiError(f"Erro da API-Football ({endpoint}): {errors}")
 
 
 class HTTPClient:
@@ -111,9 +188,10 @@ class HTTPClient:
             Dicionário com o JSON da resposta.
 
         Raises:
-            RateLimitError: Se a API retornar 429 ou soft rate limit.
-            ApiQuotaExhaustedError: Se a cota diária estiver esgotada
-                (200 com ``errors`` de "limit of request by day").
+            RateLimitError: Se a API retornar 429 (HTTP real).
+            ApiError: Se o corpo JSON tiver ``errors`` preenchido (200):
+                ApiQuotaExhaustedError (cota), ApiPlanInsufficientError
+                (plano) ou ApiError (genérico).
             HTTPClientError: Para outros erros HTTP (4xx, 5xx).
             httpx.RequestError: Para erros de rede (retentados automaticamente).
         """
@@ -137,24 +215,11 @@ class HTTPClient:
             response.raise_for_status()
             
             data = response.json()
-            
-            # API-Football retorna 200 OK mas com erro de limite no JSON
-            # (soft rate limit) ou cota diária esgotada (results: 0 + errors).
-            errors = data.get("errors", {})
-            if isinstance(errors, dict) and errors:
-                msg = " ".join(str(v) for v in errors.values()).lower()
-                if "limit of request by day" in msg or "quota" in msg:
-                    log.error(
-                        "api_football_quota_exhausted",
-                        errors=errors,
-                        results=data.get("results"),
-                    )
-                    raise ApiQuotaExhaustedError(
-                        f"Cota diária da API-Football esgotada: {errors}"
-                    )
-                if "requests" in errors or "rateLimit" in errors:
-                    log.warning("rate_limit_hit", errors=errors)
-                    raise RateLimitError(f"Rate limit da API atingido: {errors}")
+
+            # API-Football responde 200 OK com field "errors" para cota
+            # esgotada, plano insuficiente ou outros erros. Classifica e
+            # levanta a exceção específica (quota=2, plano=3, genérico=4).
+            raise_for_api_errors(data, endpoint)
 
             log.info(
                 "http_request_success",
@@ -182,7 +247,7 @@ class HTTPClient:
         except RateLimitError:
             raise
 
-        except ApiQuotaExhaustedError:
+        except ApiError:
             raise
 
         except Exception:
