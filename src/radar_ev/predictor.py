@@ -331,11 +331,14 @@ async def make_corners_prediction(
     season: int,
     football_api: object,
     threshold: float = 9.5,
+    is_over: bool = True,
 ) -> Prediction:
     """Gera predição de escanteios usando modelo Poisson.
 
     Busca estatísticas históricas dos dois times via API-Football e calcula
-    a probabilidade de o total de escanteios superar o limiar (ex: 9.5).
+    a probabilidade de o total de escanteios superar (Over) ou não atingir
+    (Under) o limiar. Para Under, P(Under X.5) = P(X ≤ k) = 1 − P(X > k),
+    com k = int(threshold).
 
     Args:
         match_id: ID da partida.
@@ -344,16 +347,18 @@ async def make_corners_prediction(
         league_id: ID da liga.
         season: Temporada (ex: 2025).
         football_api: Instância do FootballAPICollector.
-        threshold: Limiar do mercado (ex: 9.5 → Over 9.5).
+        threshold: Limiar do mercado (ex: 9.5 → Over/Under 9.5).
+        is_over: True para Over (padrão), False para Under.
 
     Returns:
         Prediction com probabilidade, odd justa e versão do modelo.
     """
+    side = "over" if is_over else "under"
     log = logger.bind(
         match_id=match_id,
         home_team_id=home_team_id,
         away_team_id=away_team_id,
-        market=f"corners_over_{threshold}",
+        market=f"corners_{side}_{threshold}",
     )
 
     try:
@@ -380,9 +385,13 @@ async def make_corners_prediction(
             away_against=away_corners["avg_against"],
         )
 
-        # Calcula probabilidade de Over (threshold)
+        # Calcula probabilidade na direção pedida (Over/Under)
         k = int(threshold)  # 9.5 → k=9, P(X > 9) = P(X >= 10)
-        prob = poisson_prob_over_k(lambda_total, k)
+        prob = (
+            poisson_prob_over_k(lambda_total, k)
+            if is_over
+            else poisson_prob_under_k(lambda_total, k + 1)
+        )
 
         # Garante que a probabilidade está em um range razoável
         prob = max(0.01, min(0.99, prob))
@@ -396,7 +405,7 @@ async def make_corners_prediction(
             fair_odd=round(fair_odd, 2),
         )
 
-        market_name = f"corners_over_{threshold}"
+        market_name = f"corners_{side}_{threshold}"
         return Prediction(
             match_id=match_id,
             market=market_name,
@@ -410,7 +419,7 @@ async def make_corners_prediction(
         # Fallback com probabilidade neutra
         return Prediction(
             match_id=match_id,
-            market=f"corners_over_{threshold}",
+            market=f"corners_{side}_{threshold}",
             probability=0.50,
             fair_odd=2.0,
             model_version="poisson_v1_fallback",
@@ -425,10 +434,15 @@ async def make_cards_prediction(
     season: int,
     football_api: object,
     threshold: float = 4.5,
-) -> Prediction:
+    is_over: bool = True,
+) -> Optional[Prediction]:
     """Gera predição de cartões usando modelo Poisson.
 
     Similar à predição de escanteios, mas usa estatísticas de cartões.
+    Para Under, P(Under X.5) = P(X ≤ k) = 1 − P(X > k), com k = int(threshold).
+
+    Se as estatísticas de cartões não estiverem disponíveis (λ = 0),
+    retorna None — cartões nunca viram oportunidade sem dados do modelo.
 
     Args:
         match_id: ID da partida.
@@ -437,12 +451,14 @@ async def make_cards_prediction(
         league_id: ID da liga.
         season: Temporada.
         football_api: Instância do FootballAPICollector.
-        threshold: Limiar do mercado (ex: 4.5 → Over 4.5).
+        threshold: Limiar do mercado (ex: 4.5 → Over/Under 4.5).
+        is_over: True para Over (padrão), False para Under.
 
     Returns:
-        Prediction com probabilidade e odd justa.
+        Prediction com probabilidade e odd justa, ou None se λ = 0.
     """
-    log = logger.bind(match_id=match_id, market=f"cards_over_{threshold}")
+    side = "over" if is_over else "under"
+    log = logger.bind(match_id=match_id, market=f"cards_{side}_{threshold}")
 
     try:
         home_stats = await football_api.get_team_statistics(home_team_id, league_id, season)
@@ -461,8 +477,22 @@ async def make_cards_prediction(
             lambda_total=round(lambda_total, 2),
         )
 
+        if lambda_total <= 0:
+            logger.warning(
+                "cards_lambda_zero",
+                match_id=match_id,
+                market=f"cards_{side}_{threshold}",
+                lambda_total=round(lambda_total, 2),
+                reason="no_card_stats_available",
+            )
+            return None
+
         k = int(threshold)
-        prob = poisson_prob_over_k(lambda_total, k)
+        prob = (
+            poisson_prob_over_k(lambda_total, k)
+            if is_over
+            else poisson_prob_under_k(lambda_total, k + 1)  # 1 − P(X > k)
+        )
         prob = max(0.01, min(0.99, prob))
         fair_odd = 1.0 / prob
 
@@ -474,7 +504,7 @@ async def make_cards_prediction(
 
         return Prediction(
             match_id=match_id,
-            market=f"cards_over_{threshold}",
+            market=f"cards_{side}_{threshold}",
             probability=round(prob, 4),
             fair_odd=round(fair_odd, 2),
             model_version="poisson_cards_v1",
@@ -484,7 +514,7 @@ async def make_cards_prediction(
         log.error("cards_prediction_failed", error=str(exc))
         return Prediction(
             match_id=match_id,
-            market=f"cards_over_{threshold}",
+            market=f"cards_{side}_{threshold}",
             probability=0.50,
             fair_odd=2.0,
             model_version="poisson_cards_v1_fallback",

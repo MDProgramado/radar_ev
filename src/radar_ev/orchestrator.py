@@ -622,6 +622,7 @@ async def _get_prediction_for_market(
             season=match.season,
             football_api=football_api,
             threshold=threshold,
+            is_over=(side == "over"),
         )
 
     elif market_type == "cards":
@@ -634,6 +635,7 @@ async def _get_prediction_for_market(
             season=match.season,
             football_api=football_api,
             threshold=threshold,
+            is_over=(side == "over"),
         )
 
     else:  # goals

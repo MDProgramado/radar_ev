@@ -284,6 +284,58 @@ class TestGetPredictionForMarket:
             assert kwargs["is_over"] is False
             assert kwargs["threshold"] == 2.5
 
+    @pytest.mark.asyncio
+    async def test_accepted_corners_under_dispatches_with_is_over_false(self):
+        # Bug 2: corners_under_9.5 deve chegar ao predictor com is_over=False.
+        from radar_ev.models import Prediction
+
+        fake_pred = Prediction(
+            match_id=1,
+            market="corners_under_9.5",
+            probability=0.4,
+            fair_odd=2.5,
+            model_version="test",
+        )
+        with patch(
+            "radar_ev.orchestrator.make_corners_prediction",
+            new=AsyncMock(return_value=fake_pred),
+        ) as mock_pred:
+            pred = await _get_prediction_for_market(
+                match=_match(),
+                market="corners_under_9.5",
+                football_api=AsyncMock(),
+            )
+            assert pred is fake_pred
+            _, kwargs = mock_pred.await_args
+            assert kwargs["is_over"] is False
+            assert kwargs["threshold"] == 9.5
+
+    @pytest.mark.asyncio
+    async def test_accepted_cards_under_dispatches_with_is_over_false(self):
+        # Bug 2: cards_under_4.5 deve chegar ao predictor com is_over=False.
+        from radar_ev.models import Prediction
+
+        fake_pred = Prediction(
+            match_id=1,
+            market="cards_under_4.5",
+            probability=0.4,
+            fair_odd=2.5,
+            model_version="test",
+        )
+        with patch(
+            "radar_ev.orchestrator.make_cards_prediction",
+            new=AsyncMock(return_value=fake_pred),
+        ) as mock_pred:
+            pred = await _get_prediction_for_market(
+                match=_match(),
+                market="cards_under_4.5",
+                football_api=AsyncMock(),
+            )
+            assert pred is fake_pred
+            _, kwargs = mock_pred.await_args
+            assert kwargs["is_over"] is False
+            assert kwargs["threshold"] == 4.5
+
 
 class TestVigFallback:
     """Integração: par Over/Under, fallback e limiares divergentes."""
